@@ -1,0 +1,12 @@
+gunicorn
+uvicorn
+fastapi
+pydantic
+fastapi
+torch
+protobuf
+soundfile
+sentencepiece
+transformers
+numpy
+python-multipart
