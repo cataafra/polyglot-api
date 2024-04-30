@@ -1,3 +1,4 @@
+# Set the base cuda enabled image
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
 # Set the working directory in the container

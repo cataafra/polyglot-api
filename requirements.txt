@@ -10,3 +10,4 @@ sentencepiece
 transformers
 numpy
 python-multipart
+colorlog
