@@ -4,6 +4,8 @@ FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 # Set the working directory in the container
 WORKDIR .
 
+COPY . .
+
 # Install basic packages for the container
 RUN apt-get update && apt-get install -y \
     curl \
@@ -19,7 +21,5 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 EXPOSE 80
 
 # Run app.py when the container launches
-CMD ["gunicorn", "-b", "0.0.0.0:80","app:app","--workers","1","-k","uvicorn.workers.UvicornWorker"]
-
-
+CMD ["gunicorn", "-b", "0.0.0.0:80","app:app","--workers","4","-k","uvicorn.workers.UvicornWorker", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-"]
 

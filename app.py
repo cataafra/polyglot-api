@@ -5,13 +5,15 @@ This file contains the FastAPI application that will be used to serve the model 
 """
 
 import os
-
+import time
 import colorlog as colorlog
 import soundfile as sf
 import torch
 import logging
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.logger import logger
 from fastapi.responses import FileResponse
+from fastapi.background import BackgroundTasks
 from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToSpeech
 
 
@@ -33,9 +35,15 @@ handler.setFormatter(colorlog.ColoredFormatter(
     style='%'
 ))
 
+gunicorn_logger = logging.getLogger('gunicorn.error')
+logger.handlers = gunicorn_logger.handlers
+if __name__ != "main":
+    logger.setLevel(gunicorn_logger.level)
+else:
+    logger.setLevel(logging.DEBUG)
+
 logger = colorlog.getLogger(__name__)
 logger.addHandler(handler)
-logger.setLevel(logging.INFO)
 
 # Set the device to use for inference
 torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -61,14 +69,16 @@ async def root():
 
 
 @app.post("/process")
-def process(file: UploadFile = File(...), language: str = Form(...)):
+def process(file: UploadFile = File(...), language: str = Form(...), background_tasks: BackgroundTasks = None):
     """
     Process the uploaded audio file and return the translated audio file.
+    :param background_tasks: BackgroundTasks, used to schedule file deletion after response
     :param file: file-like object containing the audio data
     :param language: str, the target language to translate the audio to
     :return: FileResponse containing the processed audio file
     """
     try:
+        start = time.time()
         contents = file.file.read()
         temp_path = "temp_" + file.filename
         with open(temp_path, 'wb') as f:
@@ -87,7 +97,10 @@ def process(file: UploadFile = File(...), language: str = Form(...)):
             f.flush()
             os.fsync(f.fileno())  # Ensure the output file is also flushed to disk
 
-        return FileResponse(output_path)
+        response = FileResponse(output_path, filename=output_path)  # Prepare response
+        background_tasks.add_task(os.remove, output_path)  # Schedule file deletion after response
+        logger.info(f"Processing took {time.time() - start:.2f} seconds")
+        return response
     except Exception as err:
         logger.error("There was an error processing the file: ", exc_info=True)
         return {"message": "There was an error processing the file: " + str(err)}
@@ -95,5 +108,3 @@ def process(file: UploadFile = File(...), language: str = Form(...)):
         file.file.close()
         if os.path.exists(temp_path):
             os.remove(temp_path)  # Ensure temporary file is removed after processing
-        if os.path.exists(output_path):
-            os.remove(output_path)
