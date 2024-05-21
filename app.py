@@ -6,15 +6,17 @@ This file contains the FastAPI application that will be used to serve the model 
 
 import os
 import time
+from io import BytesIO
 import colorlog as colorlog
 import soundfile as sf
 import torch
 import logging
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.logger import logger
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.background import BackgroundTasks
 from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToSpeech
+from io import BytesIO
 
 
 # Create the FastAPI app
@@ -59,6 +61,7 @@ logger.info(f"Loading model and processor from {path_name}...")
 try:
     model = SeamlessM4Tv2ForSpeechToSpeech.from_pretrained(path).to(torch_device)
     processor = AutoProcessor.from_pretrained(path)
+    logger.info(f"Model and processor loaded successfully from {path_name}")
 except Exception as e:
     logger.error(f"Error loading model and processor: {e}")
 
@@ -68,10 +71,36 @@ async def root():
     return {"message": "Welcome to Polyglot API!"}
 
 
+@app.get("/health")
+async def health():
+    """
+    Check the health of the application.
+    :return: dict containing the health status and details
+    """
+    # Check if the model and processor are loaded
+    model_loaded = model is not None
+    processor_loaded = processor is not None
+
+    # Check if the application can access the file system
+    file_system_accessible = os.access(".", os.W_OK)
+
+    # Return the health status
+    return {
+        "status": all([model_loaded, processor_loaded, file_system_accessible]),
+        "details": {
+            "model_loaded": model_loaded,
+            "processor_loaded": processor_loaded,
+            "file_system_accessible": file_system_accessible,
+        }
+    }
+
+
 @app.post("/process")
-def process(file: UploadFile = File(...), language: str = Form(...), background_tasks: BackgroundTasks = None):
+def process(file: UploadFile = File(...), language: str = Form(...), speaker_id: int = Form(...),
+            background_tasks: BackgroundTasks = None):
     """
     Process the uploaded audio file and return the translated audio file.
+    :param speaker_id: int, the speaker ID to use for the audio
     :param background_tasks: BackgroundTasks, used to schedule file deletion after response
     :param file: file-like object containing the audio data
     :param language: str, the target language to translate the audio to
@@ -88,8 +117,14 @@ def process(file: UploadFile = File(...), language: str = Form(...), background_
 
         # Read the audio file
         audio_data, samplerate = sf.read(temp_path)
+
+        # Check for speaker_id
+        speaker_id = speaker_id if speaker_id else 1
+
+        # Process the audio file
         processed_audio = processor(audios=audio_data, sampling_rate=samplerate, return_tensors="pt").to(torch_device)
-        audio_array_from_wav = model.generate(**processed_audio, tgt_lang=language)[0].cpu().numpy().squeeze()
+        audio_array_from_wav = model.generate(**processed_audio, speaker_id=speaker_id, tgt_lang=language)[
+            0].cpu().numpy().squeeze()
 
         output_path = "processed_" + file.filename
         with open(output_path, 'wb') as f:
@@ -108,3 +143,45 @@ def process(file: UploadFile = File(...), language: str = Form(...), background_
         file.file.close()
         if os.path.exists(temp_path):
             os.remove(temp_path)  # Ensure temporary file is removed after processing
+
+
+@app.post("/process_memory")
+def process_memory(file: UploadFile = File(...), language: str = Form(...), speaker_id: int = Form(...)):
+    """
+    Process the uploaded audio file in memory and return the translated audio file.
+    Similar to the process endpoint, but reads the audio file into memory and processes it without writing to disk.
+    :param speaker_id: int, the speaker ID to use for the audio
+    :param file: file-like object containing the audio data
+    :param language: str, the target language to translate the audio to
+    :return: StreamingResponse containing the processed audio file
+    """
+    try:
+        start = time.time()
+        # Read the audio file
+        contents = file.file.read()
+        file_io = BytesIO(contents)
+
+        # Read the audio file from memory
+        audio_data, samplerate = sf.read(file_io)
+
+        # Check for speaker_id
+        speaker_id = speaker_id if speaker_id else 1
+
+        # Process the audio file
+        processed_audio = processor(audios=audio_data, sampling_rate=samplerate, return_tensors="pt").to(torch_device)
+        audio_array_from_wav = model.generate(**processed_audio, speaker_id=speaker_id, tgt_lang=language)[
+            0].cpu().numpy().squeeze()
+
+        # Write the processed audio to memory
+        output_io = BytesIO()
+        sf.write(output_io, audio_array_from_wav, samplerate, format='WAV')
+        output_io.seek(0)  # Rewind the buffer to the beginning
+
+        # Log the processing time
+        logger.info(f"Processing took {time.time() - start:.2f} seconds")
+
+        # Prepare the response
+        return StreamingResponse(output_io, media_type="audio/wav")
+    except Exception as err:
+        logger.error("There was an error processing the file: ", exc_info=True)
+        return {"message": "There was an error processing the file: " + str(err)}
