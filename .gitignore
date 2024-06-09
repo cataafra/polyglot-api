@@ -8,4 +8,4 @@ out
 gen
 model
 mock_client.py
-sample.wav
+../polyglot-tkinter-app/tests/performance/sample.wav

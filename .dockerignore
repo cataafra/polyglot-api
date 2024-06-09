@@ -1,5 +1,4 @@
 .idea
 mock_client.py
-sample.wav
 .dockerignore
 dockerfile

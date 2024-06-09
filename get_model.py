@@ -5,7 +5,6 @@ from the Hugging Face model hub and save them to the local directory.
 The script must be run before running the app.py script.
 """
 
-
 from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToSpeech
 
 print("Loading model and processor from HF...")
