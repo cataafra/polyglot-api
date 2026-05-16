@@ -1,0 +1,9 @@
+[project]
+name = "polyglot-api"
+version = "0.1.0"
+description = "Database-augmented Seamless M4T speech-to-speech translation API."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

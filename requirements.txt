@@ -2,7 +2,6 @@ gunicorn
 uvicorn
 fastapi
 pydantic
-fastapi
 torch
 protobuf
 soundfile
@@ -11,3 +10,4 @@ transformers
 numpy
 python-multipart
 colorlog
+psycopg[binary]

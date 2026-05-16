@@ -9,3 +9,11 @@ gen
 model
 mock_client.py
 ../polyglot-tkinter-app/tests/performance/sample.wav
+/.agents/
+__pycache__/
+*.pyc
+.pytest_cache/
+headers/
+outputs/
+responses/
+logs/

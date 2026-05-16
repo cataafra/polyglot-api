@@ -2,7 +2,7 @@
 Simple script to download the model and processor
 from the Hugging Face model hub and save them to the local directory.
 
-The script must be run before running the app.py script.
+The script must be run before starting the API.
 """
 
 from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToSpeech
