@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS audio_segments (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     source_language TEXT NOT NULL DEFAULT 'auto',
     source_audio_hash TEXT NOT NULL,
+    source_transcript TEXT,
+    normalized_source_text TEXT,
+    source_text_hash TEXT,
+    transcript_model_name TEXT,
+    transcript_model_version TEXT,
     duration_seconds DOUBLE PRECISION NOT NULL,
     input_samplerate INTEGER NOT NULL,
     channels INTEGER NOT NULL,
@@ -34,17 +39,28 @@ CREATE TABLE IF NOT EXISTS audio_segments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE audio_segments
+    ADD COLUMN IF NOT EXISTS source_transcript TEXT,
+    ADD COLUMN IF NOT EXISTS normalized_source_text TEXT,
+    ADD COLUMN IF NOT EXISTS source_text_hash TEXT,
+    ADD COLUMN IF NOT EXISTS transcript_model_name TEXT,
+    ADD COLUMN IF NOT EXISTS transcript_model_version TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_audio_segments_hash
     ON audio_segments (source_audio_hash);
 
 CREATE INDEX IF NOT EXISTS idx_audio_segments_context
     ON audio_segments (source_language, domain, privacy_level, speaker_id);
 
+CREATE INDEX IF NOT EXISTS idx_audio_segments_text_hash
+    ON audio_segments (source_text_hash);
+
 CREATE TABLE IF NOT EXISTS audio_translations (
     id UUID PRIMARY KEY,
     audio_segment_id UUID NOT NULL REFERENCES audio_segments(id) ON DELETE CASCADE,
     target_language TEXT NOT NULL,
     translated_audio BYTEA NOT NULL,
+    translated_text TEXT,
     audio_format TEXT NOT NULL DEFAULT 'wav',
     output_samplerate INTEGER NOT NULL,
     speaker_id TEXT NOT NULL,
@@ -52,6 +68,9 @@ CREATE TABLE IF NOT EXISTS audio_translations (
     translation_model_version TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE audio_translations
+    ADD COLUMN IF NOT EXISTS translated_text TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_audio_translations_lookup
     ON audio_translations (
@@ -76,6 +95,23 @@ CREATE INDEX IF NOT EXISTS idx_audio_embeddings_hash
 
 CREATE INDEX IF NOT EXISTS idx_audio_embeddings_vector
     ON audio_embeddings USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+
+CREATE TABLE IF NOT EXISTS text_embeddings (
+    id UUID PRIMARY KEY,
+    audio_segment_id UUID NOT NULL REFERENCES audio_segments(id) ON DELETE CASCADE,
+    embedding_model_name TEXT NOT NULL,
+    embedding_model_version TEXT NOT NULL,
+    source_text_hash TEXT NOT NULL,
+    embedding VECTOR(384) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_text_embeddings_hash
+    ON text_embeddings (source_text_hash);
+
+CREATE INDEX IF NOT EXISTS idx_text_embeddings_vector
+    ON text_embeddings USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
 CREATE TABLE IF NOT EXISTS terminology_memory (

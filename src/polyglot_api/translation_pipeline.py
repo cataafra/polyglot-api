@@ -1,8 +1,10 @@
 import os
 import time
+import logging
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Optional
+from urllib.parse import quote
 
 import soundfile as sf
 
@@ -12,6 +14,9 @@ from .semantic_memory import (
     SemanticMemoryMetadata,
     parse_bool,
 )
+from .text_semantics import TextFingerprint, build_text_fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,6 +29,7 @@ class TranslationRequest:
     privacy_level: Optional[str] = None
     use_semantic_cache: Optional[str] = None
     cache_strategy: Optional[str] = None
+    use_transcript_memory: Optional[str] = None
 
 
 @dataclass
@@ -48,14 +54,41 @@ class TranslationPipeline:
         metadata = self._build_metadata(request)
 
         lookup_start = time.time()
-        lookup = self.semantic_memory.lookup(metadata, fingerprint)
+        lookup = self._lookup_audio_exact(metadata, fingerprint)
         lookup_time = time.time() - lookup_start
+        if lookup.hit and lookup.audio_bytes:
+            total_time = time.time() - start
+            return TranslationResult(
+                audio_bytes=lookup.audio_bytes,
+                headers=self._headers(
+                    lookup,
+                    total_time,
+                    inference_time=0.0,
+                    lookup_time=lookup_time,
+                    transcript_time=0.0,
+                ),
+            )
+
+        transcript_start = time.time()
+        text_fingerprint = self._build_transcript_fingerprint(audio_data, sample_rate, metadata)
+        transcript_time = time.time() - transcript_start
+
+        lookup_start = time.time()
+        lookup = self.semantic_memory.lookup(metadata, fingerprint, text_fingerprint=text_fingerprint)
+        lookup = self._attach_transcript_context(lookup, text_fingerprint)
+        lookup_time += time.time() - lookup_start
 
         if lookup.hit and lookup.audio_bytes:
             total_time = time.time() - start
             return TranslationResult(
                 audio_bytes=lookup.audio_bytes,
-                headers=self._headers(lookup, total_time, inference_time=0.0, lookup_time=lookup_time),
+                headers=self._headers(
+                    lookup,
+                    total_time,
+                    inference_time=0.0,
+                    lookup_time=lookup_time,
+                    transcript_time=transcript_time,
+                ),
             )
 
         inference_start = time.time()
@@ -73,17 +106,28 @@ class TranslationPipeline:
                 fingerprint=fingerprint,
                 translated_audio=output_bytes,
                 output_samplerate=sample_rate,
+                text_fingerprint=text_fingerprint,
             )
 
         total_time = time.time() - start
         return TranslationResult(
             audio_bytes=output_bytes,
-            headers=self._headers(lookup, total_time, inference_time, lookup_time),
+            headers=self._headers(lookup, total_time, inference_time, lookup_time, transcript_time),
         )
 
     @staticmethod
     def _read_audio(contents: bytes):
         return sf.read(BytesIO(contents))
+
+    def _lookup_audio_exact(
+        self,
+        metadata: SemanticMemoryMetadata,
+        fingerprint,
+    ) -> CacheLookupResult:
+        lookup_audio_exact = getattr(self.semantic_memory, "lookup_audio_exact", None)
+        if not lookup_audio_exact:
+            return CacheLookupResult(False, "exact", "audio exact lookup unavailable")
+        return lookup_audio_exact(metadata, fingerprint)
 
     @staticmethod
     def _build_metadata(request: TranslationRequest) -> SemanticMemoryMetadata:
@@ -99,7 +143,51 @@ class TranslationPipeline:
                 request.use_semantic_cache,
                 default=parse_bool(os.getenv("POLYGLOT_SEMANTIC_CACHE_ENABLED"), default=False),
             ),
+            use_transcript_memory=parse_bool(
+                request.use_transcript_memory,
+                default=parse_bool(os.getenv("POLYGLOT_TRANSCRIPT_MEMORY_ENABLED"), default=True),
+            ),
         )
+
+    def _build_transcript_fingerprint(
+        self,
+        audio_data,
+        sample_rate: int,
+        metadata: SemanticMemoryMetadata,
+    ) -> Optional[TextFingerprint]:
+        if not metadata.use_semantic_cache or not metadata.use_transcript_memory:
+            return None
+        if not metadata.source_language or metadata.source_language.lower() == "auto":
+            return None
+        try:
+            transcript = self.translator.transcribe(
+                audio_data=audio_data,
+                sample_rate=sample_rate,
+                source_language=metadata.source_language,
+            )
+        except Exception as exc:
+            logger.warning("transcript_memory_failed source_language=%s error=%s", metadata.source_language, exc)
+            return None
+        fingerprint = build_text_fingerprint(
+            transcript,
+            dimensions=int(os.getenv("POLYGLOT_EMBEDDING_DIMENSIONS", "384")),
+        )
+        if not fingerprint.normalized_text:
+            return None
+        return fingerprint
+
+    @staticmethod
+    def _attach_transcript_context(
+        lookup: CacheLookupResult,
+        text_fingerprint: Optional[TextFingerprint],
+    ) -> CacheLookupResult:
+        if not text_fingerprint:
+            return lookup
+        if not lookup.source_transcript:
+            lookup.source_transcript = text_fingerprint.source_transcript
+        if not lookup.normalized_source_text:
+            lookup.normalized_source_text = text_fingerprint.normalized_text
+        return lookup
 
     @staticmethod
     def _headers(
@@ -107,10 +195,12 @@ class TranslationPipeline:
         total_time: float,
         inference_time: float,
         lookup_time: float,
+        transcript_time: float,
     ) -> dict[str, str]:
         headers = {
             "X-Polyglot-Cache": "hit" if lookup.hit else "miss",
             "X-Polyglot-Cache-Strategy": lookup.strategy,
+            "X-Polyglot-Cache-Layer": lookup.cache_layer,
             "X-Polyglot-Cache-Decision": lookup.decision_reason[:256],
             "X-Polyglot-Decision": lookup.decision_reason[:256],
             "X-Polyglot-Model-Version": os.getenv(
@@ -118,11 +208,22 @@ class TranslationPipeline:
                 "local-or-huggingface",
             ),
             "X-Polyglot-Total-Time": f"{total_time:.4f}",
+            "X-Polyglot-Transcript-Time": f"{transcript_time:.4f}",
             "X-Polyglot-Inference-Time": f"{inference_time:.4f}",
             "X-Polyglot-Lookup-Time": f"{lookup_time:.4f}",
         }
         if lookup.similarity is not None:
             headers["X-Polyglot-Similarity"] = f"{lookup.similarity:.6f}"
+        if lookup.text_similarity is not None:
+            headers["X-Polyglot-Text-Similarity"] = f"{lookup.text_similarity:.6f}"
         if lookup.translation_id:
             headers["X-Polyglot-Translation-Id"] = lookup.translation_id
+        if lookup.source_transcript:
+            headers["X-Polyglot-Source-Transcript"] = _safe_header_text(lookup.source_transcript)
+        if lookup.normalized_source_text:
+            headers["X-Polyglot-Normalized-Text"] = _safe_header_text(lookup.normalized_source_text)
         return headers
+
+
+def _safe_header_text(value: str) -> str:
+    return quote(value[:256], safe="")

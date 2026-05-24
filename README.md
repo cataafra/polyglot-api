@@ -8,7 +8,7 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 
 - Process audio files and return translated audio.
 - Preserve the existing Seamless M4T speech-to-speech inference path.
-- Optional Postgres + pgvector audio memory for database-augmented caching.
+- Optional Postgres + pgvector audio/transcript memory for database-augmented caching.
 - Logging with Gunicorn and colorlog.
 - Dockerized application.
 - API documentation with Swagger UI.
@@ -19,20 +19,24 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 - `src/polyglot_api/translation_pipeline.py`: audio decoding, memory lookup, inference orchestration, and experiment headers.
 - `src/polyglot_api/translator.py`: Seamless M4T model loading and speech-to-speech inference.
 - `src/polyglot_api/audio_fingerprint.py`: deterministic audio fingerprint and vector generation.
+- `src/polyglot_api/text_semantics.py`: transcript normalization, hashing, and deterministic text-vector generation.
 - `src/polyglot_api/semantic_memory.py`: Postgres + pgvector memory adapter.
 - `src/polyglot_api/db_schema.sql`: database schema for sessions, audio vectors, translated audio, provenance, and audit events.
 - `scripts/`: model download and benchmark helpers.
 - `tests/`: focused unit tests for stable modules.
 
-## Audio Semantic Translation Memory
+## Transcript-Aware Semantic Translation Memory
 
-The API can optionally use Postgres + pgvector as a model-versioned speech-to-speech memory. It works directly on uploaded audio segments:
+The API can optionally use Postgres + pgvector as a model-versioned speech-to-speech memory. It keeps the user-facing Seamless M4T speech-to-speech path, but it can extract a transcript first when `source_language` is explicit:
 
 ```text
 audio segment
--> audio fingerprint / vector
--> database lookup
--> cache hit: return stored translated audio
+-> audio fingerprint + optional Seamless transcript
+-> exact audio lookup
+-> normalized transcript lookup
+-> transcript vector lookup
+-> audio vector lookup
+-> cache hit: return stored translated audio bytes
 -> cache miss: run Seamless M4T and store translated audio
 ```
 
@@ -43,19 +47,23 @@ The existing `/process` and `/process_memory` endpoints remain audio-in/audio-ou
 - `domain`
 - `privacy_level`
 - `use_semantic_cache`
+- `use_transcript_memory`
 - `cache_strategy`: `stateless`, `exact`, `semantic`, or `context`
 
-No transcript is required. The v1 fingerprint is deterministic and lightweight, so it is best for exact and near-duplicate audio reuse. A learned speech embedding model can replace it later for stronger semantic generalization.
+Transcript memory is skipped when `source_language=auto`, so old clients continue to work. For the strongest demo, set an explicit source language such as `ron`. The system normalizes transcripts before hashing, so `câine`, `Caine!`, and `câine.` all map to `caine`.
 
 ### Environment
 
 - `POLYGLOT_DATABASE_URL`: Postgres DSN. If omitted, semantic memory is disabled.
 - `POLYGLOT_AUTO_INIT_DB`: initialize schema on startup. Default: `true`.
 - `POLYGLOT_SEMANTIC_CACHE_ENABLED`: default cache toggle. Default: `false`.
+- `POLYGLOT_TRANSCRIPT_MEMORY_ENABLED`: default transcript-memory toggle. Default: `true`.
 - `POLYGLOT_CACHE_STRATEGY`: default strategy. Default: `context`.
 - `POLYGLOT_SIMILARITY_THRESHOLD`: default audio-vector threshold. Default: `0.98`.
+- `POLYGLOT_TEXT_SIMILARITY_THRESHOLD`: default transcript-vector threshold. Default: `0.92`.
 - `POLYGLOT_TRANSLATION_MODEL_VERSION`: provenance label for stored translations.
 - `POLYGLOT_AUDIO_EMBEDDING_MODEL_VERSION`: provenance label for the audio fingerprint.
+- `POLYGLOT_TEXT_EMBEDDING_MODEL_VERSION`: provenance label for text embeddings.
 
 ### Local pgvector stack
 
@@ -97,7 +105,15 @@ curl -k -D headers/headers-2.txt -o outputs/out-2.wav \
   https://localhost/process_memory
 ```
 
-Responses include experiment headers such as `X-Polyglot-Cache`, `X-Polyglot-Similarity`, `X-Polyglot-Lookup-Time`, and `X-Polyglot-Inference-Time`.
+Responses include experiment headers such as `X-Polyglot-Cache`, `X-Polyglot-Cache-Layer`, `X-Polyglot-Source-Transcript`, `X-Polyglot-Normalized-Text`, `X-Polyglot-Text-Similarity`, `X-Polyglot-Lookup-Time`, `X-Polyglot-Transcript-Time`, and `X-Polyglot-Inference-Time`. Transcript text headers are UTF-8 percent-encoded for HTTP safety; the Tkinter client decodes them before display.
+
+### Real speech demo
+
+For a live demo, use the Tkinter app in Demo Mode or send two different recordings with the same spoken word:
+
+1. Set `source_language=ron`, `language=eng`, `use_semantic_cache=true`, and `use_transcript_memory=true`.
+2. Say `câine` once. The first request should miss, run Seamless, and store translated audio.
+3. Say `câine` again naturally. The second request can hit `X-Polyglot-Cache-Layer: text_exact` even when the waveform is not identical.
 
 ### Benchmark helper
 

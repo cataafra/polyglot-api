@@ -21,8 +21,10 @@ services:
       POLYGLOT_DATABASE_URL: postgresql://polyglot:polyglot@db:5432/polyglot
       POLYGLOT_AUTO_INIT_DB: "true"
       POLYGLOT_SEMANTIC_CACHE_ENABLED: "true"
+      POLYGLOT_TRANSCRIPT_MEMORY_ENABLED: "true"
       POLYGLOT_CACHE_STRATEGY: context
       POLYGLOT_SIMILARITY_THRESHOLD: "0.98"
+      POLYGLOT_TEXT_SIMILARITY_THRESHOLD: "0.92"
     ports:
       - "443:443"
     depends_on:

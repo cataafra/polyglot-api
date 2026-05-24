@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from .audio_fingerprint import AudioFingerprint
+from .text_semantics import (
+    DEFAULT_TEXT_EMBEDDING_MODEL,
+    DEFAULT_TEXT_EMBEDDING_VERSION,
+    TextFingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,7 @@ class SemanticMemoryMetadata:
     privacy_level: str
     cache_strategy: str
     use_semantic_cache: bool
+    use_transcript_memory: bool
 
 
 @dataclass
@@ -37,9 +43,13 @@ class CacheLookupResult:
     strategy: str
     decision_reason: str
     similarity: Optional[float] = None
+    text_similarity: Optional[float] = None
     translation_id: Optional[str] = None
     audio_bytes: Optional[bytes] = None
     output_samplerate: Optional[int] = None
+    cache_layer: str = "miss"
+    source_transcript: Optional[str] = None
+    normalized_source_text: Optional[str] = None
 
 
 def parse_bool(value: Any, default: bool = False) -> bool:
@@ -82,6 +92,7 @@ class NullSemanticMemory:
         self,
         metadata: SemanticMemoryMetadata,
         fingerprint: AudioFingerprint,
+        text_fingerprint: Optional[TextFingerprint] = None,
     ) -> CacheLookupResult:
         return CacheLookupResult(
             hit=False,
@@ -89,12 +100,20 @@ class NullSemanticMemory:
             decision_reason="semantic memory is disabled",
         )
 
+    def lookup_audio_exact(
+        self,
+        metadata: SemanticMemoryMetadata,
+        fingerprint: AudioFingerprint,
+    ) -> CacheLookupResult:
+        return CacheLookupResult(False, "disabled", "semantic memory is disabled")
+
     def store(
         self,
         metadata: SemanticMemoryMetadata,
         fingerprint: AudioFingerprint,
         translated_audio: bytes,
         output_samplerate: int,
+        text_fingerprint: Optional[TextFingerprint] = None,
     ) -> None:
         return None
 
@@ -113,18 +132,28 @@ class PostgresSemanticMemory:
         dsn: str,
         embedding_dimensions: int = 384,
         similarity_threshold: float = 0.98,
+        text_similarity_threshold: float = 0.92,
         translation_model_name: str = DEFAULT_TRANSLATION_MODEL,
         translation_model_version: str = DEFAULT_MODEL_VERSION,
         audio_embedding_model_name: str = DEFAULT_AUDIO_EMBEDDING_MODEL,
         audio_embedding_model_version: str = DEFAULT_AUDIO_EMBEDDING_VERSION,
+        text_embedding_model_name: str = DEFAULT_TEXT_EMBEDDING_MODEL,
+        text_embedding_model_version: str = DEFAULT_TEXT_EMBEDDING_VERSION,
+        transcript_model_name: str = DEFAULT_TRANSLATION_MODEL,
+        transcript_model_version: str = DEFAULT_MODEL_VERSION,
     ):
         self.dsn = dsn
         self.embedding_dimensions = embedding_dimensions
         self.similarity_threshold = similarity_threshold
+        self.text_similarity_threshold = text_similarity_threshold
         self.translation_model_name = translation_model_name
         self.translation_model_version = translation_model_version
         self.audio_embedding_model_name = audio_embedding_model_name
         self.audio_embedding_model_version = audio_embedding_model_version
+        self.text_embedding_model_name = text_embedding_model_name
+        self.text_embedding_model_version = text_embedding_model_version
+        self.transcript_model_name = transcript_model_name
+        self.transcript_model_version = transcript_model_version
         self._psycopg = None
         self._dict_row = None
 
@@ -167,6 +196,8 @@ class PostgresSemanticMemory:
         versions = [
             ("translation", self.translation_model_name, self.translation_model_version),
             ("audio_embedding", self.audio_embedding_model_name, self.audio_embedding_model_version),
+            ("text_embedding", self.text_embedding_model_name, self.text_embedding_model_version),
+            ("transcript", self.transcript_model_name, self.transcript_model_version),
         ]
         for model_type, model_name, version in versions:
             cur.execute(
@@ -189,11 +220,15 @@ class PostgresSemanticMemory:
             return {
                 "enabled": True,
                 "status": bool(row and row["ok"] == 1),
-                "mode": "audio",
+                "mode": "audio+transcript",
+                "transcript_memory": True,
                 "similarity_threshold": self.similarity_threshold,
+                "text_similarity_threshold": self.text_similarity_threshold,
                 "embedding_dimensions": self.embedding_dimensions,
                 "embedding_model": self.audio_embedding_model_name,
                 "embedding_version": self.audio_embedding_model_version,
+                "text_embedding_model": self.text_embedding_model_name,
+                "text_embedding_version": self.text_embedding_model_version,
             }
         except Exception as exc:
             logger.warning("Semantic memory health check failed: %s", exc)
@@ -203,6 +238,7 @@ class PostgresSemanticMemory:
         self,
         metadata: SemanticMemoryMetadata,
         fingerprint: AudioFingerprint,
+        text_fingerprint: Optional[TextFingerprint] = None,
     ) -> CacheLookupResult:
         if not self.enabled:
             return CacheLookupResult(False, "disabled", "semantic memory disabled")
@@ -215,11 +251,30 @@ class PostgresSemanticMemory:
 
         try:
             exact = self._lookup_exact(metadata, fingerprint)
-            if exact.hit or strategy == "exact":
+            if exact.hit:
+                return exact
+
+            text_lookup_enabled = self._can_use_text_memory(metadata, text_fingerprint)
+            if text_lookup_enabled:
+                text_exact = self._lookup_text_exact(metadata, text_fingerprint)
+                if text_exact.hit:
+                    return text_exact
+                if strategy == "exact":
+                    return text_exact
+            elif strategy == "exact":
                 return exact
 
             if strategy not in {"semantic", "context"}:
                 return CacheLookupResult(False, strategy, "unknown cache strategy")
+
+            if text_lookup_enabled:
+                text_vector = self._lookup_text_vector(
+                    metadata=metadata,
+                    text_fingerprint=text_fingerprint,
+                    context_aware=strategy == "context",
+                )
+                if text_vector.hit:
+                    return text_vector
 
             return self._lookup_vector(
                 metadata=metadata,
@@ -229,6 +284,36 @@ class PostgresSemanticMemory:
         except Exception as exc:
             logger.exception("Audio semantic lookup failed")
             return CacheLookupResult(False, strategy, f"lookup error: {exc}")
+
+    def lookup_audio_exact(
+        self,
+        metadata: SemanticMemoryMetadata,
+        fingerprint: AudioFingerprint,
+    ) -> CacheLookupResult:
+        if not self.enabled:
+            return CacheLookupResult(False, "disabled", "semantic memory disabled")
+        if not metadata.use_semantic_cache:
+            return CacheLookupResult(False, "stateless", "semantic cache disabled by request")
+        if (metadata.cache_strategy or "").lower() == "stateless":
+            return CacheLookupResult(False, "stateless", "stateless baseline selected")
+        try:
+            return self._lookup_exact(metadata, fingerprint)
+        except Exception as exc:
+            logger.exception("Audio exact semantic lookup failed")
+            return CacheLookupResult(False, "exact", f"audio exact lookup error: {exc}")
+
+    @staticmethod
+    def _can_use_text_memory(
+        metadata: SemanticMemoryMetadata,
+        text_fingerprint: Optional[TextFingerprint],
+    ) -> bool:
+        return bool(
+            metadata.use_transcript_memory
+            and metadata.source_language
+            and metadata.source_language.lower() != "auto"
+            and text_fingerprint
+            and text_fingerprint.normalized_text
+        )
 
     def _lookup_exact(
         self,
@@ -249,6 +334,8 @@ class PostgresSemanticMemory:
               AND at.speaker_id = %s
               AND at.translation_model_name = %s
               AND at.translation_model_version = %s
+              AND aseg.domain = %s
+              AND aseg.privacy_level = %s
               AND s.retention_expires_at > NOW()
             ORDER BY at.created_at DESC
             LIMIT 1
@@ -264,6 +351,8 @@ class PostgresSemanticMemory:
                         metadata.speaker_id,
                         self.translation_model_name,
                         self.translation_model_version,
+                        metadata.domain,
+                        metadata.privacy_level,
                     ),
                 )
                 row = cur.fetchone()
@@ -281,6 +370,197 @@ class PostgresSemanticMemory:
             translation_id=row["translation_id"],
             audio_bytes=bytes(row["translated_audio"]) if row["translated_audio"] else None,
             output_samplerate=row["output_samplerate"],
+            cache_layer="audio_exact",
+        )
+
+    def _lookup_text_exact(
+        self,
+        metadata: SemanticMemoryMetadata,
+        text_fingerprint: TextFingerprint,
+    ) -> CacheLookupResult:
+        query = """
+            SELECT
+                at.id::text AS translation_id,
+                at.translated_audio,
+                at.output_samplerate,
+                aseg.source_transcript,
+                aseg.normalized_source_text
+            FROM audio_translations at
+            JOIN audio_segments aseg ON aseg.id = at.audio_segment_id
+            JOIN sessions s ON s.id = aseg.session_id
+            WHERE aseg.source_text_hash = %s
+              AND aseg.source_language = %s
+              AND at.target_language = %s
+              AND at.speaker_id = %s
+              AND at.translation_model_name = %s
+              AND at.translation_model_version = %s
+              AND aseg.transcript_model_name = %s
+              AND aseg.transcript_model_version = %s
+              AND aseg.domain = %s
+              AND aseg.privacy_level = %s
+              AND s.retention_expires_at > NOW()
+            ORDER BY at.created_at DESC
+            LIMIT 1
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    query,
+                    (
+                        text_fingerprint.text_hash,
+                        metadata.source_language,
+                        metadata.target_language,
+                        metadata.speaker_id,
+                        self.translation_model_name,
+                        self.translation_model_version,
+                        self.transcript_model_name,
+                        self.transcript_model_version,
+                        metadata.domain,
+                        metadata.privacy_level,
+                    ),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            self._audit(
+                None,
+                "text_exact_miss",
+                {"source_text_hash": text_fingerprint.text_hash},
+            )
+            return CacheLookupResult(
+                False,
+                "exact",
+                "no normalized transcript match",
+                cache_layer="miss",
+                source_transcript=text_fingerprint.source_transcript,
+                normalized_source_text=text_fingerprint.normalized_text,
+            )
+
+        self._audit(None, "text_exact_hit", {"translation_id": row["translation_id"]})
+        return CacheLookupResult(
+            hit=True,
+            strategy="exact",
+            decision_reason="normalized transcript match",
+            text_similarity=1.0,
+            translation_id=row["translation_id"],
+            audio_bytes=bytes(row["translated_audio"]) if row["translated_audio"] else None,
+            output_samplerate=row["output_samplerate"],
+            cache_layer="text_exact",
+            source_transcript=row["source_transcript"] or text_fingerprint.source_transcript,
+            normalized_source_text=row["normalized_source_text"] or text_fingerprint.normalized_text,
+        )
+
+    def _lookup_text_vector(
+        self,
+        metadata: SemanticMemoryMetadata,
+        text_fingerprint: TextFingerprint,
+        context_aware: bool,
+    ) -> CacheLookupResult:
+        filters = [
+            "aseg.source_language = %(source_language)s",
+            "at.target_language = %(target_language)s",
+            "at.speaker_id = %(speaker_id)s",
+            "at.translation_model_name = %(translation_model_name)s",
+            "at.translation_model_version = %(translation_model_version)s",
+            "aseg.transcript_model_name = %(transcript_model_name)s",
+            "aseg.transcript_model_version = %(transcript_model_version)s",
+            "te.embedding_model_name = %(embedding_model_name)s",
+            "te.embedding_model_version = %(embedding_model_version)s",
+            "aseg.privacy_level = %(privacy_level)s",
+            "s.retention_expires_at > NOW()",
+        ]
+        if context_aware:
+            filters.extend(
+                [
+                    "aseg.domain = %(domain)s",
+                ]
+            )
+
+        query = f"""
+            SELECT
+                at.id::text AS translation_id,
+                at.translated_audio,
+                at.output_samplerate,
+                aseg.source_transcript,
+                aseg.normalized_source_text,
+                1 - (te.embedding <=> %(embedding)s::vector) AS similarity
+            FROM text_embeddings te
+            JOIN audio_segments aseg ON aseg.id = te.audio_segment_id
+            JOIN sessions s ON s.id = aseg.session_id
+            JOIN audio_translations at ON at.audio_segment_id = aseg.id
+            WHERE {' AND '.join(filters)}
+            ORDER BY te.embedding <=> %(embedding)s::vector
+            LIMIT 1
+        """
+        params = {
+            "source_language": metadata.source_language,
+            "target_language": metadata.target_language,
+            "speaker_id": metadata.speaker_id,
+            "translation_model_name": self.translation_model_name,
+            "translation_model_version": self.translation_model_version,
+            "transcript_model_name": self.transcript_model_name,
+            "transcript_model_version": self.transcript_model_version,
+            "embedding_model_name": self.text_embedding_model_name,
+            "embedding_model_version": self.text_embedding_model_version,
+            "domain": metadata.domain,
+            "privacy_level": metadata.privacy_level,
+            "embedding": vector_literal(text_fingerprint.embedding),
+        }
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+
+        strategy = "context" if context_aware else "semantic"
+        if not row:
+            self._audit(None, f"text_{strategy}_miss", {"reason": "no text vector candidates"})
+            return CacheLookupResult(
+                False,
+                strategy,
+                "no text vector candidates",
+                cache_layer="miss",
+                source_transcript=text_fingerprint.source_transcript,
+                normalized_source_text=text_fingerprint.normalized_text,
+            )
+
+        similarity = float(row["similarity"])
+        if similarity < self.text_similarity_threshold:
+            self._audit(
+                None,
+                f"text_{strategy}_reject",
+                {
+                    "translation_id": row["translation_id"],
+                    "similarity": similarity,
+                    "threshold": self.text_similarity_threshold,
+                },
+            )
+            return CacheLookupResult(
+                False,
+                strategy,
+                "best text vector candidate below threshold",
+                text_similarity=similarity,
+                translation_id=row["translation_id"],
+                cache_layer="miss",
+                source_transcript=text_fingerprint.source_transcript,
+                normalized_source_text=text_fingerprint.normalized_text,
+            )
+
+        self._audit(
+            None,
+            f"text_{strategy}_hit",
+            {"translation_id": row["translation_id"], "similarity": similarity},
+        )
+        return CacheLookupResult(
+            hit=True,
+            strategy=strategy,
+            decision_reason="text vector candidate accepted",
+            text_similarity=similarity,
+            translation_id=row["translation_id"],
+            audio_bytes=bytes(row["translated_audio"]) if row["translated_audio"] else None,
+            output_samplerate=row["output_samplerate"],
+            cache_layer="text_vector",
+            source_transcript=row["source_transcript"] or text_fingerprint.source_transcript,
+            normalized_source_text=row["normalized_source_text"] or text_fingerprint.normalized_text,
         )
 
     def _lookup_vector(
@@ -297,13 +577,13 @@ class PostgresSemanticMemory:
             "at.translation_model_version = %(translation_model_version)s",
             "ae.embedding_model_name = %(embedding_model_name)s",
             "ae.embedding_model_version = %(embedding_model_version)s",
+            "aseg.privacy_level = %(privacy_level)s",
             "s.retention_expires_at > NOW()",
         ]
         if context_aware:
             filters.extend(
                 [
                     "aseg.domain = %(domain)s",
-                    "aseg.privacy_level = %(privacy_level)s",
                 ]
             )
 
@@ -375,6 +655,7 @@ class PostgresSemanticMemory:
             translation_id=row["translation_id"],
             audio_bytes=bytes(row["translated_audio"]) if row["translated_audio"] else None,
             output_samplerate=row["output_samplerate"],
+            cache_layer="audio_vector",
         )
 
     def store(
@@ -383,6 +664,7 @@ class PostgresSemanticMemory:
         fingerprint: AudioFingerprint,
         translated_audio: bytes,
         output_samplerate: int,
+        text_fingerprint: Optional[TextFingerprint] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -390,6 +672,7 @@ class PostgresSemanticMemory:
         session_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"polyglot:{metadata.session_id}")
         audio_segment_uuid = uuid.uuid4()
         audio_embedding_uuid = uuid.uuid4()
+        text_embedding_uuid = uuid.uuid4()
         translation_uuid = uuid.uuid4()
 
         try:
@@ -431,6 +714,11 @@ class PostgresSemanticMemory:
                             session_id,
                             source_language,
                             source_audio_hash,
+                            source_transcript,
+                            normalized_source_text,
+                            source_text_hash,
+                            transcript_model_name,
+                            transcript_model_version,
                             duration_seconds,
                             input_samplerate,
                             channels,
@@ -438,13 +726,18 @@ class PostgresSemanticMemory:
                             domain,
                             privacy_level
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             audio_segment_uuid,
                             session_uuid,
                             metadata.source_language,
                             fingerprint.audio_hash,
+                            text_fingerprint.source_transcript if text_fingerprint else None,
+                            text_fingerprint.normalized_text if text_fingerprint else None,
+                            text_fingerprint.text_hash if text_fingerprint else None,
+                            self.transcript_model_name if text_fingerprint else None,
+                            self.transcript_model_version if text_fingerprint else None,
                             fingerprint.duration_seconds,
                             fingerprint.sample_rate,
                             fingerprint.channels,
@@ -499,6 +792,28 @@ class PostgresSemanticMemory:
                             vector_literal(fingerprint.embedding),
                         ),
                     )
+                    if text_fingerprint:
+                        cur.execute(
+                            """
+                            INSERT INTO text_embeddings (
+                                id,
+                                audio_segment_id,
+                                embedding_model_name,
+                                embedding_model_version,
+                                source_text_hash,
+                                embedding
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s::vector)
+                            """,
+                            (
+                                text_embedding_uuid,
+                                audio_segment_uuid,
+                                self.text_embedding_model_name,
+                                self.text_embedding_model_version,
+                                text_fingerprint.text_hash,
+                                vector_literal(text_fingerprint.embedding),
+                            ),
+                        )
                     cur.execute(
                         """
                         INSERT INTO audit_events (session_id, event_type, details)
@@ -511,6 +826,8 @@ class PostgresSemanticMemory:
                                 {
                                     "translation_id": str(translation_uuid),
                                     "audio_hash": fingerprint.audio_hash,
+                                    "source_text_hash": text_fingerprint.text_hash if text_fingerprint else None,
+                                    "has_transcript": text_fingerprint is not None,
                                     "cache_strategy": metadata.cache_strategy,
                                     "target_language": metadata.target_language,
                                     "duration_seconds": fingerprint.duration_seconds,
@@ -583,6 +900,7 @@ def build_semantic_memory() -> Union[NullSemanticMemory, PostgresSemanticMemory]
         dsn=dsn,
         embedding_dimensions=int(os.getenv("POLYGLOT_EMBEDDING_DIMENSIONS", "384")),
         similarity_threshold=float(os.getenv("POLYGLOT_SIMILARITY_THRESHOLD", "0.98")),
+        text_similarity_threshold=float(os.getenv("POLYGLOT_TEXT_SIMILARITY_THRESHOLD", "0.92")),
         translation_model_name=os.getenv("POLYGLOT_TRANSLATION_MODEL", DEFAULT_TRANSLATION_MODEL),
         translation_model_version=os.getenv("POLYGLOT_TRANSLATION_MODEL_VERSION", DEFAULT_MODEL_VERSION),
         audio_embedding_model_name=os.getenv("POLYGLOT_AUDIO_EMBEDDING_MODEL", DEFAULT_AUDIO_EMBEDDING_MODEL),
@@ -590,6 +908,13 @@ def build_semantic_memory() -> Union[NullSemanticMemory, PostgresSemanticMemory]
             "POLYGLOT_AUDIO_EMBEDDING_MODEL_VERSION",
             DEFAULT_AUDIO_EMBEDDING_VERSION,
         ),
+        text_embedding_model_name=os.getenv("POLYGLOT_TEXT_EMBEDDING_MODEL", DEFAULT_TEXT_EMBEDDING_MODEL),
+        text_embedding_model_version=os.getenv(
+            "POLYGLOT_TEXT_EMBEDDING_MODEL_VERSION",
+            DEFAULT_TEXT_EMBEDDING_VERSION,
+        ),
+        transcript_model_name=os.getenv("POLYGLOT_TRANSCRIPT_MODEL", DEFAULT_TRANSLATION_MODEL),
+        transcript_model_version=os.getenv("POLYGLOT_TRANSCRIPT_MODEL_VERSION", DEFAULT_MODEL_VERSION),
     )
     if parse_bool(os.getenv("POLYGLOT_AUTO_INIT_DB"), default=True):
         try:

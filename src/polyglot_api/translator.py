@@ -64,3 +64,54 @@ class SeamlessTranslator:
         sf.write(output_io, audio_array, sample_rate, format="WAV")
         output_io.seek(0)
         return output_io.read()
+
+    def transcribe(self, audio_data, sample_rate: int, source_language: str) -> str:
+        if not self.ready:
+            raise RuntimeError("Translation model or processor is not loaded")
+        if not source_language or source_language.lower() == "auto":
+            return ""
+        source_language = source_language.replace("__", "")
+
+        processed_audio = self.processor(
+            audio=audio_data,
+            sampling_rate=sample_rate,
+            return_tensors="pt",
+        ).to(self.device)
+
+        generation_kwargs = dict(processed_audio)
+        input_features = generation_kwargs.pop("input_features", None)
+        if input_features is None:
+            raise RuntimeError("Processor did not return input_features for transcription")
+
+        language_id = self.model.generation_config.text_decoder_lang_to_code_id.get(source_language)
+        if language_id is None:
+            raise ValueError(f"source_language={source_language} is not supported for transcription")
+
+        batch_size = len(input_features)
+        generation_kwargs["decoder_input_ids"] = torch.tensor([[language_id]] * batch_size, device=self.device)
+        generation_kwargs["return_dict_in_generate"] = True
+        generation_kwargs.setdefault("max_new_tokens", int(os.getenv("POLYGLOT_TRANSCRIPT_MAX_NEW_TOKENS", "64")))
+
+        with torch.inference_mode():
+            output_tokens = super(SeamlessM4Tv2ForSpeechToSpeech, self.model).generate(
+                input_features,
+                **generation_kwargs,
+            )
+        return self._decode_text_tokens(output_tokens)
+
+    def _decode_text_tokens(self, output_tokens) -> str:
+        tokens = output_tokens
+        if hasattr(tokens, "sequences"):
+            tokens = tokens.sequences
+        if isinstance(tokens, (tuple, list)):
+            tokens = tokens[0]
+        if hasattr(tokens, "detach"):
+            tokens = tokens.detach().cpu()
+        if hasattr(tokens, "tolist"):
+            tokens = tokens.tolist()
+
+        while isinstance(tokens, list) and tokens and isinstance(tokens[0], list):
+            tokens = tokens[0]
+        if not tokens:
+            return ""
+        return self.processor.decode(tokens, skip_special_tokens=True).strip()

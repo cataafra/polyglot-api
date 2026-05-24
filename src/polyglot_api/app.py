@@ -52,6 +52,7 @@ async def root():
 async def health():
     translator_health = translator.health()
     file_system_accessible = os.access(".", os.W_OK)
+    semantic_health = semantic_memory.health()
 
     return {
         "status": all(
@@ -61,10 +62,14 @@ async def health():
                 file_system_accessible,
             ]
         ),
+        "model_loaded": translator_health["model_loaded"],
+        "processor_loaded": translator_health["processor_loaded"],
+        "device": translator_health.get("device", "unknown"),
+        "semantic_memory": semantic_health,
         "details": {
             **translator_health,
             "file_system_accessible": file_system_accessible,
-            "semantic_memory": semantic_memory.health(),
+            "semantic_memory": semantic_health,
         },
     }
 
@@ -81,6 +86,7 @@ def process(
     privacy_level: Optional[str] = Form(None),
     use_semantic_cache: Optional[str] = Form(None),
     cache_strategy: Optional[str] = Form(None),
+    use_transcript_memory: Optional[str] = Form(None),
 ):
     output_path = None
     try:
@@ -94,6 +100,7 @@ def process(
             privacy_level=privacy_level,
             use_semantic_cache=use_semantic_cache,
             cache_strategy=cache_strategy,
+            use_transcript_memory=use_transcript_memory,
         )
 
         output_path = "processed_" + os.path.basename(file.filename)
@@ -130,6 +137,7 @@ def process_memory(
     privacy_level: Optional[str] = Form(None),
     use_semantic_cache: Optional[str] = Form(None),
     cache_strategy: Optional[str] = Form(None),
+    use_transcript_memory: Optional[str] = Form(None),
 ):
     try:
         result = _process_upload(
@@ -142,6 +150,7 @@ def process_memory(
             privacy_level=privacy_level,
             use_semantic_cache=use_semantic_cache,
             cache_strategy=cache_strategy,
+            use_transcript_memory=use_transcript_memory,
         )
         return StreamingResponse(
             BytesIO(result.audio_bytes),
@@ -174,17 +183,19 @@ def _process_upload(
     privacy_level: Optional[str],
     use_semantic_cache: Optional[str],
     cache_strategy: Optional[str],
+    use_transcript_memory: Optional[str],
 ):
     return pipeline.process(
         contents=file.file.read(),
         request=TranslationRequest(
             target_language=language,
-            speaker_id=speaker_id if speaker_id else 1,
+            speaker_id=speaker_id if speaker_id is not None else 1,
             session_id=session_id,
             source_language=source_language,
             domain=domain,
             privacy_level=privacy_level,
             use_semantic_cache=use_semantic_cache,
             cache_strategy=cache_strategy,
+            use_transcript_memory=use_transcript_memory,
         ),
     )
