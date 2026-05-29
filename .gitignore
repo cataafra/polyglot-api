@@ -17,3 +17,7 @@ headers/
 outputs/
 responses/
 logs/
+evaluation/**/results/
+evaluation/**/outputs/
+evaluation/**/*.wav
+!evaluation/**/audio/README.md

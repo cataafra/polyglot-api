@@ -1,0 +1,12 @@
+case_id,group_id,workload,audio_path,source_language,target_language,speaker_id,domain,privacy_level,expected_cache_layer,expected_reuse_allowed,notes
+ro-caine-001,ro-caine,natural_repeat,audio/ro-caine-001.wav,ron,eng,0,demo,transient,miss,true,First natural recording seeds memory.
+ro-caine-002,ro-caine,natural_repeat,audio/ro-caine-002.wav,ron,eng,0,demo,transient,text_exact,true,Second natural recording should reuse if transcript normalizes to caine.
+ro-caine-replay,ro-caine,replay,audio/ro-caine-001.wav,ron,eng,0,demo,transient,audio_exact,true,Exact replay should use the audio hash layer.
+ro-paine-negative,ro-paine,negative_control,audio/ro-paine-001.wav,ron,eng,0,demo,transient,miss,false,Dangerous near match: paine must not reuse caine.
+ro-buna-001,ro-buna,natural_repeat,audio/ro-buna-001.wav,ron,eng,0,demo,transient,miss,true,First buna dimineata recording seeds memory.
+ro-buna-002,ro-buna,natural_repeat,audio/ro-buna-002.wav,ron,eng,0,demo,transient,text_exact,true,Second natural recording should reuse if transcript is stable.
+ro-prezentare-001,ro-prezentare,natural_repeat,audio/ro-prezentare-001.wav,ron,eng,0,demo,transient,miss,true,First presentation phrase seeds memory.
+ro-prezentare-002,ro-prezentare,natural_repeat,audio/ro-prezentare-002.wav,ron,eng,0,demo,transient,text_exact,true,Second presentation phrase should reuse if transcript is stable.
+ro-legal-001,ro-legal,domain_context,audio/ro-legal-001.wav,ron,eng,0,legal,transient,miss,true,Legal-domain phrase seeds legal memory.
+ro-legal-medical,ro-legal,domain_context,audio/ro-legal-001.wav,ron,eng,0,medical,transient,miss,false,Same audio in incompatible domain should not reuse in context strategy.
+ro-caine-speaker,ro-caine,speaker_context,audio/ro-caine-001.wav,ron,eng,1,demo,transient,miss,false,Same audio with different target speaker should not reuse translated audio.

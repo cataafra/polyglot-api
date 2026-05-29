@@ -15,6 +15,7 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 
 ## Project Layout
 
+- `RUNPOD_DEPLOY.md`: GPU Pod deployment guide for API + local pgvector memory.
 - `src/polyglot_api/app.py`: FastAPI adapter and HTTP response handling.
 - `src/polyglot_api/translation_pipeline.py`: audio decoding, memory lookup, inference orchestration, and experiment headers.
 - `src/polyglot_api/translator.py`: Seamless M4T model loading and speech-to-speech inference.
@@ -22,7 +23,8 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 - `src/polyglot_api/text_semantics.py`: transcript normalization, hashing, and deterministic text-vector generation.
 - `src/polyglot_api/semantic_memory.py`: Postgres + pgvector memory adapter.
 - `src/polyglot_api/db_schema.sql`: database schema for sessions, audio vectors, translated audio, provenance, and audit events.
-- `scripts/`: model download and benchmark helpers.
+ - `scripts/`: model download, evaluation, and synthetic DB seeding helpers.
+- `evaluation/`: reproducible demo manifest and thesis benchmark notes.
 - `tests/`: focused unit tests for stable modules.
 
 ## Transcript-Aware Semantic Translation Memory
@@ -54,6 +56,7 @@ Transcript memory is skipped when `source_language=auto`, so old clients continu
 
 ### Environment
 
+- `POLYGLOT_API_TOKEN`: optional shared token required through `X-Polyglot-Api-Key` when set.
 - `POLYGLOT_DATABASE_URL`: Postgres DSN. If omitted, semantic memory is disabled.
 - `POLYGLOT_AUTO_INIT_DB`: initialize schema on startup. Default: `true`.
 - `POLYGLOT_SEMANTIC_CACHE_ENABLED`: default cache toggle. Default: `false`.
@@ -115,14 +118,23 @@ For a live demo, use the Tkinter app in Demo Mode or send two different recordin
 2. Say `câine` once. The first request should miss, run Seamless, and store translated audio.
 3. Say `câine` again naturally. The second request can hit `X-Polyglot-Cache-Layer: text_exact` even when the waveform is not identical.
 
-### Benchmark helper
+### Evaluation runner
 
 ```bash
-python scripts/semantic_benchmark.py samples.csv https://localhost --strategy context
+python scripts/semantic_benchmark.py \
+  --manifest evaluation/demo/manifest.csv \
+  --base-url https://localhost \
+  --strategy context \
+  --session-id demo-eval-001 \
+  --output-dir evaluation/demo/results
 ```
 
-The CSV must contain:
+The runner writes `raw_requests.jsonl`, summary CSV files, `db_stats.csv`, and `evaluation_report.md`. The demo manifest expects WAV files in `evaluation/demo/audio/`.
 
-```csv
-audio_path,source_language,target_language,domain
+For database-scale tests that do not require thousands of Seamless inferences, seed synthetic records:
+
+```bash
+python scripts/seed_semantic_eval_db.py \
+  --database-url "$POLYGLOT_DATABASE_URL" \
+  --records 10000
 ```

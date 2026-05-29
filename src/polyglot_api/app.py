@@ -4,10 +4,11 @@ from io import BytesIO
 from typing import Optional
 
 import colorlog
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.background import BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 
+from .auth import require_api_token
 from .semantic_memory import build_semantic_memory
 from .translation_pipeline import TranslationPipeline, TranslationRequest
 from .translator import SeamlessTranslator
@@ -49,7 +50,7 @@ async def root():
 
 
 @app.get("/health")
-async def health():
+async def health(_authorized: bool = Depends(require_api_token)):
     translator_health = translator.health()
     file_system_accessible = os.access(".", os.W_OK)
     semantic_health = semantic_memory.health()
@@ -79,6 +80,7 @@ def process(
     file: UploadFile = File(...),
     language: str = Form(...),
     speaker_id: int = Form(...),
+    _authorized: bool = Depends(require_api_token),
     background_tasks: BackgroundTasks = None,
     session_id: Optional[str] = Form(None),
     source_language: Optional[str] = Form(None),
@@ -131,6 +133,7 @@ def process_memory(
     file: UploadFile = File(...),
     language: str = Form(...),
     speaker_id: int = Form(...),
+    _authorized: bool = Depends(require_api_token),
     session_id: Optional[str] = Form(None),
     source_language: Optional[str] = Form(None),
     domain: Optional[str] = Form(None),
@@ -165,7 +168,7 @@ def process_memory(
 
 
 @app.post("/memory/expire")
-def expire_memory():
+def expire_memory(_authorized: bool = Depends(require_api_token)):
     try:
         return {"deleted_sessions": semantic_memory.expire_old_records()}
     except Exception as exc:
