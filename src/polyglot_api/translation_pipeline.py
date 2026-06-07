@@ -69,27 +69,30 @@ class TranslationPipeline:
                 ),
             )
 
-        transcript_start = time.time()
-        text_fingerprint = self._build_transcript_fingerprint(audio_data, sample_rate, metadata)
-        transcript_time = time.time() - transcript_start
+        text_fingerprint = None
+        transcript_time = 0.0
+        if metadata.cache_strategy != "exact":
+            transcript_start = time.time()
+            text_fingerprint = self._build_transcript_fingerprint(audio_data, sample_rate, metadata)
+            transcript_time = time.time() - transcript_start
 
-        lookup_start = time.time()
-        lookup = self.semantic_memory.lookup(metadata, fingerprint, text_fingerprint=text_fingerprint)
-        lookup = self._attach_transcript_context(lookup, text_fingerprint)
-        lookup_time += time.time() - lookup_start
+            lookup_start = time.time()
+            lookup = self.semantic_memory.lookup(metadata, fingerprint, text_fingerprint=text_fingerprint)
+            lookup = self._attach_transcript_context(lookup, text_fingerprint)
+            lookup_time += time.time() - lookup_start
 
-        if lookup.hit and lookup.audio_bytes:
-            total_time = time.time() - start
-            return TranslationResult(
-                audio_bytes=lookup.audio_bytes,
-                headers=self._headers(
-                    lookup,
-                    total_time,
-                    inference_time=0.0,
-                    lookup_time=lookup_time,
-                    transcript_time=transcript_time,
-                ),
-            )
+            if lookup.hit and lookup.audio_bytes:
+                total_time = time.time() - start
+                return TranslationResult(
+                    audio_bytes=lookup.audio_bytes,
+                    headers=self._headers(
+                        lookup,
+                        total_time,
+                        inference_time=0.0,
+                        lookup_time=lookup_time,
+                        transcript_time=transcript_time,
+                    ),
+                )
 
         inference_start = time.time()
         output_bytes = self.translator.translate(
@@ -222,8 +225,14 @@ class TranslationPipeline:
             headers["X-Polyglot-Source-Transcript"] = _safe_header_text(lookup.source_transcript)
         if lookup.normalized_source_text:
             headers["X-Polyglot-Normalized-Text"] = _safe_header_text(lookup.normalized_source_text)
-        return headers
+        return {key: _header_value(value) for key, value in headers.items()}
 
 
 def _safe_header_text(value: str) -> str:
     return quote(value[:256], safe="")
+
+
+def _header_value(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("latin-1", errors="replace")
+    return str(value)

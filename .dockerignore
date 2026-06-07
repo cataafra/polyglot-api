@@ -1,6 +1,8 @@
 .git
 .idea
 venv
+*.tar
+*.tar.gz
 __pycache__
 *.pyc
 *.pyo
@@ -12,7 +14,15 @@ outputs
 responses
 logs
 
+evaluation/**/results/
+evaluation/**/outputs/
+evaluation/corpora/
+evaluation/manifests/
+evaluation/runpod/
+evaluation/**/LATEST_RESULTS.md
+evaluation/**/*.wav
+evaluation/**/*.mp3
+
 mock_client.py
-semantic_benchmark.py
 docker-compose*.yml
 README.md

@@ -5,6 +5,9 @@ ENV PYTHONPATH=/app/src
 ENV PGDATA=/workspace/polyglot-postgres
 ENV WORKER_COUNT=1
 ENV GUNICORN_TIMEOUT=600
+ENV POLYGLOT_DEVICE=auto
+ENV POLYGLOT_TORCH_DTYPE=auto
+ENV POLYGLOT_MODEL_LOW_CPU_MEM_USAGE=true
 
 WORKDIR /app
 
@@ -30,7 +33,8 @@ RUN git clone --branch v0.8.0 --depth 1 https://github.com/pgvector/pgvector.git
     && rm -rf /tmp/pgvector
 
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch \
+RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 \
+        torch torchvision torchaudio \
     && pip3 install --no-cache-dir -r requirements.txt
 
 COPY model ./model

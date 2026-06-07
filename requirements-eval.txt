@@ -1,0 +1,11 @@
+-r requirements-dev.txt
+datasets==2.21.0
+pandas
+pyarrow
+librosa
+soundfile
+sacrebleu
+jiwer
+rapidfuzz
+matplotlib
+seaborn

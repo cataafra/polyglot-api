@@ -1,0 +1,68 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONPATH=/app/src
+ENV PGDATA=/workspace/polyglot-postgres
+ENV POLYGLOT_EVALUATION_ROOT=/workspace/polyglot-evaluation
+ENV POLYGLOT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/polyglot
+ENV POLYGLOT_AUTO_INIT_DB=true
+ENV POLYGLOT_SEMANTIC_CACHE_ENABLED=true
+ENV POLYGLOT_TRANSCRIPT_MEMORY_ENABLED=true
+ENV POLYGLOT_CACHE_STRATEGY=context
+ENV POLYGLOT_DEVICE=auto
+ENV POLYGLOT_TORCH_DTYPE=auto
+ENV POLYGLOT_MODEL_LOW_CPU_MEM_USAGE=true
+ENV WORKER_COUNT=1
+ENV GUNICORN_TIMEOUT=900
+ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    openssh-server \
+    openssl \
+    postgresql \
+    postgresql-contrib \
+    postgresql-server-dev-all \
+    python3 \
+    python3-pip \
+    rsync \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/sshd /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+
+RUN git clone --branch v0.8.0 --depth 1 https://github.com/pgvector/pgvector.git /tmp/pgvector \
+    && cd /tmp/pgvector \
+    && make \
+    && make install \
+    && rm -rf /tmp/pgvector
+
+COPY requirements.txt requirements-dev.txt requirements-eval.txt ./
+RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 \
+        torch torchvision torchaudio \
+    && pip3 install --no-cache-dir -r requirements-eval.txt
+
+COPY model ./model
+COPY src ./src
+COPY scripts ./scripts
+COPY tests ./tests
+COPY evaluation ./evaluation
+COPY pyproject.toml pytest.ini ./
+
+RUN mkdir -p /workspace/polyglot-evaluation/datasets /workspace/polyglot-evaluation/results \
+    && chmod +x /app/scripts/runpod/start-runpod.sh
+
+VOLUME ["/workspace"]
+EXPOSE 8000
+
+CMD ["/app/scripts/runpod/start-runpod.sh"]

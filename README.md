@@ -16,6 +16,7 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 ## Project Layout
 
 - `RUNPOD_DEPLOY.md`: GPU Pod deployment guide for API + local pgvector memory.
+- `evaluation/REPRODUCIBILITY.md`: research-grade dataset, RunPod, matrix, DB scale, and report procedure.
 - `src/polyglot_api/app.py`: FastAPI adapter and HTTP response handling.
 - `src/polyglot_api/translation_pipeline.py`: audio decoding, memory lookup, inference orchestration, and experiment headers.
 - `src/polyglot_api/translator.py`: Seamless M4T model loading and speech-to-speech inference.
@@ -24,7 +25,7 @@ The project/distribution name is `polyglot-api`. The import package remains `pol
 - `src/polyglot_api/semantic_memory.py`: Postgres + pgvector memory adapter.
 - `src/polyglot_api/db_schema.sql`: database schema for sessions, audio vectors, translated audio, provenance, and audit events.
  - `scripts/`: model download, evaluation, and synthetic DB seeding helpers.
-- `evaluation/`: reproducible demo manifest and thesis benchmark notes.
+- `evaluation/`: thesis benchmark design and reproducibility notes.
 - `tests/`: focused unit tests for stable modules.
 
 ## Transcript-Aware Semantic Translation Memory
@@ -118,18 +119,24 @@ For a live demo, use the Tkinter app in Demo Mode or send two different recordin
 2. Say `câine` once. The first request should miss, run Seamless, and store translated audio.
 3. Say `câine` again naturally. The second request can hit `X-Polyglot-Cache-Layer: text_exact` even when the waveform is not identical.
 
-### Evaluation runner
+### Evaluation runners
+
+For thesis-grade evaluation, prepare public dataset manifests and run the strategy matrix:
 
 ```bash
-python scripts/semantic_benchmark.py \
-  --manifest evaluation/demo/manifest.csv \
-  --base-url https://localhost \
-  --strategy context \
-  --session-id demo-eval-001 \
-  --output-dir evaluation/demo/results
+python scripts/prepare_evaluation_data.py all \
+  --output-root evaluation \
+  --source-dir /path/to/common-voice-ro-25.0
+
+python scripts/run_evaluation_matrix.py \
+  --manifest evaluation/manifests/common_voice_ro_manifest.csv \
+  --manifest evaluation/manifests/fleurs_manifest.csv \
+  --manifest evaluation/manifests/covost2_manifest.csv \
+  --base-url http://127.0.0.1:8000 \
+  --output-dir evaluation/runpod/results
 ```
 
-The runner writes `raw_requests.jsonl`, summary CSV files, `db_stats.csv`, and `evaluation_report.md`. The demo manifest expects WAV files in `evaluation/demo/audio/`.
+Full local and RunPod commands are in `evaluation/REPRODUCIBILITY.md`.
 
 For database-scale tests that do not require thousands of Seamless inferences, seed synthetic records:
 

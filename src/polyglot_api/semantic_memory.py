@@ -253,16 +253,14 @@ class PostgresSemanticMemory:
             exact = self._lookup_exact(metadata, fingerprint)
             if exact.hit:
                 return exact
+            if strategy == "exact":
+                return exact
 
             text_lookup_enabled = self._can_use_text_memory(metadata, text_fingerprint)
             if text_lookup_enabled:
                 text_exact = self._lookup_text_exact(metadata, text_fingerprint)
                 if text_exact.hit:
                     return text_exact
-                if strategy == "exact":
-                    return text_exact
-            elif strategy == "exact":
-                return exact
 
             if strategy not in {"semantic", "context"}:
                 return CacheLookupResult(False, strategy, "unknown cache strategy")

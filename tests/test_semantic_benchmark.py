@@ -30,6 +30,7 @@ def test_parse_response_extracts_cache_layer_and_transcript_metrics():
             "X-Polyglot-Source-Transcript": "c%C3%A2ine",
             "X-Polyglot-Normalized-Text": "caine",
             "X-Polyglot-Text-Similarity": "1.000000",
+            "X-Polyglot-Hypothesis-Text": "dog",
             "X-Polyglot-Lookup-Time": "0.0400",
             "X-Polyglot-Transcript-Time": "1.2100",
             "X-Polyglot-Inference-Time": "0.0000",
@@ -38,9 +39,12 @@ def test_parse_response_extracts_cache_layer_and_transcript_metrics():
     )
 
     assert result["cache"] == "hit"
+    assert result["strategy"] == "context"
+    assert result["cache_strategy"] == "context"
     assert result["cache_layer"] == "text_exact"
     assert result["source_transcript"] == "câine"
     assert result["normalized_text"] == "caine"
+    assert result["hypothesis_text"] == "dog"
     assert result["text_similarity"] == 1.0
     assert result["correct"] is True
 
@@ -110,6 +114,7 @@ def test_write_outputs_creates_expected_artifacts(tmp_path):
         timeout_seconds=1.0,
         database_url=None,
         api_key=None,
+        pod_hour_usd=0.0,
     )
     results = [
         {
@@ -131,8 +136,78 @@ def test_write_outputs_creates_expected_artifacts(tmp_path):
 
     assert (config.output_dir / "raw_requests.jsonl").exists()
     assert (config.output_dir / "summary.csv").exists()
+    assert (config.output_dir / "summary_by_dataset.csv").exists()
+    assert (config.output_dir / "cache_confusion_matrix.csv").exists()
+    assert (config.output_dir / "quality_metrics.csv").exists()
+    assert (config.output_dir / "cost_model.csv").exists()
+    assert (config.output_dir / "threshold_sweep.csv").exists()
     assert (config.output_dir / "db_stats.csv").exists()
     assert (config.output_dir / "evaluation_report.md").exists()
+    assert (config.output_dir / "final_evaluation_report.md").exists()
+
+
+def test_confusion_matrix_and_cost_count_only_safe_hits():
+    results = [
+        {
+            "dataset": "common_voice_ro",
+            "strategy": "stateless",
+            "cache": "miss",
+            "cache_layer": "miss",
+            "correct": True,
+            "expected_reuse_allowed": True,
+            "expected_cache_layer": "miss",
+            "client_total_time": 10.0,
+            "inference_time": 8.0,
+        },
+        {
+            "dataset": "common_voice_ro",
+            "strategy": "context",
+            "cache": "hit",
+            "cache_layer": "text_exact",
+            "correct": True,
+            "expected_reuse_allowed": True,
+            "expected_cache_layer": "text_exact",
+            "client_total_time": 1.0,
+            "inference_time": 0.0,
+        },
+        {
+            "dataset": "common_voice_ro",
+            "strategy": "semantic",
+            "cache": "hit",
+            "cache_layer": "text_vector",
+            "correct": False,
+            "expected_reuse_allowed": False,
+            "expected_cache_layer": "miss",
+            "client_total_time": 1.0,
+            "inference_time": 0.0,
+        },
+    ]
+
+    confusion = {row["strategy"]: row for row in semantic_benchmark.confusion_matrix_rows(results)}
+    cost = {row["strategy"]: row for row in semantic_benchmark.cost_model_rows(results, pod_hour_usd=1.0)}
+
+    assert confusion["context"]["true_positive"] == 1
+    assert confusion["semantic"]["false_positive"] == 1
+    assert cost["context"]["avoided_inference_seconds"] == 8.0
+    assert cost["semantic"]["avoided_inference_seconds"] == 0
+
+
+def test_quality_summary_uses_source_and_translation_pairs():
+    rows = [
+        {
+            "source_text": "ana are mere",
+            "source_transcript": "ana are mere",
+            "reference_text": "ana has apples",
+            "hypothesis_text": "ana has apples",
+            "quality_required": True,
+        }
+    ]
+
+    summary = semantic_benchmark.quality_summary(rows)
+
+    assert summary["source_pairs"] == 1
+    assert summary["translation_pairs"] == 1
+    assert summary["source_wer"] == 0
 
 
 def test_auth_headers_are_only_sent_when_api_key_is_configured():

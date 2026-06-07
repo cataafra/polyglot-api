@@ -1,13 +1,13 @@
-### Example user template template
-### Example user template
-
 # IntelliJ project files
 .idea
 *.iml
 out
 gen
 model
+venv/
 mock_client.py
+*.tar
+*.tar.gz
 ../polyglot-tkinter-app/tests/performance/sample.wav
 /.agents/
 __pycache__/
@@ -19,5 +19,11 @@ responses/
 logs/
 evaluation/**/results/
 evaluation/**/outputs/
+evaluation/corpora/
+evaluation/manifests/
+evaluation/runpod/
+evaluation/**/LATEST_RESULTS.md
 evaluation/**/*.wav
-!evaluation/**/audio/README.md
+evaluation/**/*.mp3
+
+evaluation/runpod/keys/

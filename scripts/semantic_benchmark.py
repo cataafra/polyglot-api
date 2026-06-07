@@ -46,6 +46,7 @@ class BenchmarkConfig:
     timeout_seconds: float
     database_url: str | None
     api_key: str | None
+    pod_hour_usd: float
 
 
 def parse_bool(value: Any, default: bool = False) -> bool:
@@ -120,6 +121,12 @@ def post_sample(
         )
     elapsed = time.time() - started_at
     response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if "audio/" not in content_type and "application/octet-stream" not in content_type:
+        raise RuntimeError(
+            f"expected audio response from {endpoint}, got {content_type or 'unknown'}: "
+            f"{response.text[:500]}"
+        )
 
     if config.save_audio and not warmup:
         audio_dir = config.output_dir / "outputs"
@@ -149,8 +156,15 @@ def parse_response(
     headers: dict[str, str],
     warmup: bool = False,
 ) -> dict[str, Any]:
-    cache = headers.get("X-Polyglot-Cache", "unknown")
-    cache_layer = headers.get("X-Polyglot-Cache-Layer", "unknown")
+    headers = {str(key).lower(): value for key, value in headers.items()}
+    expected_cache_layer, expected_reuse_allowed = strategy_expectation(
+        strategy,
+        row,
+        expected_cache_layer,
+        expected_reuse_allowed,
+    )
+    cache = headers.get("x-polyglot-cache", "unknown")
+    cache_layer = headers.get("x-polyglot-cache-layer", "unknown")
     reuse_happened = cache == "hit"
     layer_matches = not expected_cache_layer or expected_cache_layer == cache_layer
     safe_reuse = expected_reuse_allowed or not reuse_happened
@@ -159,34 +173,60 @@ def parse_response(
         "request_index": request_index,
         "warmup": warmup,
         "case_id": row.get("case_id", ""),
+        "dataset": row.get("dataset", ""),
+        "split": row.get("split", ""),
         "group_id": row.get("group_id", ""),
+        "reuse_group": row.get("reuse_group", row.get("group_id", "")),
         "repeat_index": int(row.get("repeat_index") or 1),
         "workload": row.get("workload", ""),
         "audio_path": row.get("audio_path", ""),
         "source_language": row.get("source_language", "auto"),
         "target_language": row.get("target_language", ""),
+        "source_text": row.get("source_text", ""),
+        "reference_text": row.get("reference_text", ""),
+        "quality_required": parse_bool(row.get("quality_required"), default=bool(row.get("reference_text", ""))),
+        "source_clip_id": row.get("source_clip_id", ""),
         "speaker_id": row.get("speaker_id", "0"),
         "domain": row.get("domain", "general"),
         "privacy_level": row.get("privacy_level", "transient"),
-        "strategy": headers.get("X-Polyglot-Cache-Strategy", strategy),
+        "strategy": strategy,
+        "cache_strategy": headers.get("x-polyglot-cache-strategy", strategy),
         "cache": cache,
         "cache_layer": cache_layer,
-        "decision": headers.get("X-Polyglot-Cache-Decision") or headers.get("X-Polyglot-Decision", ""),
-        "source_transcript": unquote(headers.get("X-Polyglot-Source-Transcript", "")),
-        "normalized_text": unquote(headers.get("X-Polyglot-Normalized-Text", "")),
-        "similarity": to_float(headers.get("X-Polyglot-Similarity")),
-        "text_similarity": to_float(headers.get("X-Polyglot-Text-Similarity")),
-        "lookup_time": to_float(headers.get("X-Polyglot-Lookup-Time")),
-        "transcript_time": to_float(headers.get("X-Polyglot-Transcript-Time")),
-        "inference_time": to_float(headers.get("X-Polyglot-Inference-Time")),
-        "server_total_time": to_float(headers.get("X-Polyglot-Total-Time")),
+        "decision": headers.get("x-polyglot-cache-decision") or headers.get("x-polyglot-decision", ""),
+        "source_transcript": unquote(headers.get("x-polyglot-source-transcript", "")),
+        "normalized_text": unquote(headers.get("x-polyglot-normalized-text", "")),
+        "hypothesis_text": unquote(
+            headers.get("x-polyglot-hypothesis-text", "")
+            or headers.get("x-polyglot-translation-text", "")
+        ),
+        "similarity": to_float(headers.get("x-polyglot-similarity")),
+        "text_similarity": to_float(headers.get("x-polyglot-text-similarity")),
+        "lookup_time": to_float(headers.get("x-polyglot-lookup-time")),
+        "transcript_time": to_float(headers.get("x-polyglot-transcript-time")),
+        "inference_time": to_float(headers.get("x-polyglot-inference-time")),
+        "server_total_time": to_float(headers.get("x-polyglot-total-time")),
         "client_total_time": elapsed,
-        "translation_id": headers.get("X-Polyglot-Translation-Id", ""),
+        "translation_id": headers.get("x-polyglot-translation-id", ""),
         "expected_cache_layer": expected_cache_layer,
         "expected_reuse_allowed": expected_reuse_allowed,
         "correct": bool(layer_matches and safe_reuse),
         "notes": row.get("notes", ""),
     }
+
+
+def strategy_expectation(
+    strategy: str,
+    row: dict[str, str],
+    expected_cache_layer: str,
+    expected_reuse_allowed: bool,
+) -> tuple[str, bool]:
+    workload = row.get("workload", "")
+    if strategy == "stateless":
+        return "miss", expected_reuse_allowed
+    if strategy == "exact":
+        return ("audio_exact", expected_reuse_allowed) if workload == "exact_replay" else ("miss", expected_reuse_allowed)
+    return expected_cache_layer, expected_reuse_allowed
 
 
 def to_float(value: Any) -> float | None:
@@ -212,10 +252,22 @@ def run_benchmark(config: BenchmarkConfig) -> list[dict[str, Any]]:
         post_sample(config, row, warmup_index, warmup=True)
 
     if config.concurrency <= 1:
-        return [
-            post_sample(config, row, request_index=index)
-            for index, row in enumerate(workload, start=1)
-        ]
+        results = []
+        total = len(workload)
+        progress_interval = max(1, int(os.getenv("POLYGLOT_BENCHMARK_PROGRESS_INTERVAL", "100")))
+        started_at = time.time()
+        for index, row in enumerate(workload, start=1):
+            results.append(post_sample(config, row, request_index=index))
+            if index == total or index % progress_interval == 0:
+                elapsed = max(time.time() - started_at, 1e-9)
+                rate = index / elapsed
+                remaining = (total - index) / rate if rate else 0.0
+                print(
+                    f"progress strategy={config.strategy} manifest={config.manifest.name} "
+                    f"{index}/{total} rate={rate:.2f}/s eta_seconds={remaining:.0f}",
+                    flush=True,
+                )
+        return results
 
     results = []
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
@@ -293,15 +345,22 @@ def write_outputs(config: BenchmarkConfig, results: list[dict[str, Any]]) -> Non
     write_jsonl(config.output_dir / "raw_requests.jsonl", results)
     write_csv(config.output_dir / "summary.csv", [summarize(results)])
     write_csv(config.output_dir / "summary_by_strategy.csv", group_summaries(results, "strategy"))
+    write_csv(config.output_dir / "summary_by_dataset.csv", group_summaries(results, "dataset"))
     write_csv(config.output_dir / "summary_by_cache_layer.csv", group_summaries(results, "cache_layer"))
     write_csv(config.output_dir / "summary_by_workload.csv", group_summaries(results, "workload"))
     write_csv(config.output_dir / "latency_distribution.csv", latency_distribution(results))
     write_csv(config.output_dir / "db_stats.csv", collect_db_stats(config.database_url))
+    write_csv(config.output_dir / "cache_confusion_matrix.csv", confusion_matrix_rows(results))
+    write_csv(config.output_dir / "quality_metrics.csv", quality_metrics_rows(results))
+    write_csv(config.output_dir / "cost_model.csv", cost_model_rows(results, config.pod_hour_usd))
+    write_csv(config.output_dir / "threshold_sweep.csv", threshold_sweep_rows(results))
     write_csv(
         config.output_dir / "incorrect_reuse_cases.csv",
         [result for result in results if not result["correct"]],
     )
     write_markdown_report(config.output_dir / "evaluation_report.md", config, results)
+    write_markdown_report(config.output_dir / "final_evaluation_report.md", config, results)
+    write_plots(config.output_dir, results, config.pod_hour_usd)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -321,6 +380,76 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def write_plots(output_dir: Path, results: list[dict[str, Any]], pod_hour_usd: float = 0.0) -> None:
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        (plots_dir / "plot_status.txt").write_text(
+            "matplotlib is not installed; install requirements-eval.txt to render plots.\n",
+            encoding="utf-8",
+        )
+        return
+
+    strategy_rows = group_summaries(results, "strategy")
+    cost_rows = cost_model_rows(results, pod_hour_usd)
+    confusion_rows = confusion_matrix_rows(results)
+
+    render_bar_chart(
+        plt,
+        plots_dir / "hit_rate_by_strategy.png",
+        [row["group"] for row in strategy_rows],
+        [row["hit_rate"] * 100.0 for row in strategy_rows],
+        "Cache hit rate by strategy",
+        "Hit rate (%)",
+    )
+    render_bar_chart(
+        plt,
+        plots_dir / "p95_latency_by_strategy.png",
+        [row["group"] for row in strategy_rows],
+        [row["p95_client_total_time"] for row in strategy_rows],
+        "p95 client latency by strategy",
+        "Seconds",
+    )
+    render_bar_chart(
+        plt,
+        plots_dir / "correct_hits_by_strategy.png",
+        [row["strategy"] for row in cost_rows],
+        [row["correct_cache_hits"] for row in cost_rows],
+        "Correct avoided inferences by strategy",
+        "Correct cache hits",
+    )
+    render_bar_chart(
+        plt,
+        plots_dir / "unsafe_reuse_by_strategy.png",
+        [row["strategy"] for row in confusion_rows],
+        [row["false_positive"] for row in confusion_rows],
+        "Unsafe reuse cases by strategy",
+        "False positives",
+    )
+
+
+def render_bar_chart(plt, path: Path, labels: list[str], values: list[float], title: str, ylabel: str) -> None:
+    figure_width = max(6.0, 1.3 * max(1, len(labels)))
+    fig, ax = plt.subplots(figsize=(figure_width, 4.0))
+    colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#17becf"]
+    ax.bar(labels, values, color=colors[: len(labels)])
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", alpha=0.25)
+    ax.set_axisbelow(True)
+    for tick in ax.get_xticklabels():
+        tick.set_rotation(20)
+        tick.set_horizontalalignment("right")
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
 def latency_distribution(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for metric in ("client_total_time", "server_total_time", "lookup_time", "transcript_time", "inference_time"):
@@ -338,6 +467,191 @@ def latency_distribution(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def confusion_matrix_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for strategy, strategy_results in group_by(results, "strategy").items():
+        true_positive = sum(
+            1
+            for row in strategy_results
+            if row.get("cache") == "hit" and row.get("expected_reuse_allowed", True) and row.get("correct")
+        )
+        false_positive = sum(
+            1
+            for row in strategy_results
+            if row.get("cache") == "hit" and not row.get("expected_reuse_allowed", True)
+        )
+        false_negative = sum(
+            1
+            for row in strategy_results
+            if row.get("cache") != "hit"
+            and row.get("expected_reuse_allowed", True)
+            and row.get("expected_cache_layer", "") not in {"", "miss"}
+        )
+        true_negative = sum(
+            1
+            for row in strategy_results
+            if row.get("cache") != "hit"
+            and (not row.get("expected_reuse_allowed", True) or row.get("expected_cache_layer", "") in {"", "miss"})
+        )
+        rows.append(
+            {
+                "strategy": strategy,
+                "true_positive": true_positive,
+                "false_positive": false_positive,
+                "false_negative": false_negative,
+                "true_negative": true_negative,
+                "precision": ratio(true_positive, true_positive + false_positive),
+                "recall": ratio(true_positive, true_positive + false_negative),
+                "f1": ratio(2 * true_positive, 2 * true_positive + false_positive + false_negative),
+            }
+        )
+    return rows
+
+
+def quality_metrics_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for key in ("strategy", "dataset"):
+        for group, group_results in group_by(results, key).items():
+            rows.append({"group_type": key, "group": group, **quality_summary(group_results)})
+    return rows
+
+
+def quality_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    source_pairs = [
+        (row.get("source_text", ""), row.get("source_transcript", ""))
+        for row in results
+        if row.get("source_text") and row.get("source_transcript")
+    ]
+    translation_pairs = [
+        (row.get("reference_text", ""), row.get("hypothesis_text", ""))
+        for row in results
+        if row.get("reference_text") and row.get("hypothesis_text")
+    ]
+    return {
+        "source_wer": wer(source_pairs),
+        "translation_bleu": bleu(translation_pairs),
+        "translation_chrf": chrf(translation_pairs),
+        "source_pairs": len(source_pairs),
+        "translation_pairs": len(translation_pairs),
+        "quality_required": sum(1 for row in results if row.get("quality_required")),
+    }
+
+
+def cost_model_rows(results: list[dict[str, Any]], pod_hour_usd: float) -> list[dict[str, Any]]:
+    baseline_by_dataset = {
+        dataset: mean(values(dataset_results, "inference_time"))
+        for dataset, dataset_results in group_by(
+            [row for row in results if row.get("strategy") == "stateless"],
+            "dataset",
+        ).items()
+    }
+    global_baseline = mean(values([row for row in results if row.get("strategy") == "stateless"], "inference_time"))
+    rows = []
+    for strategy, strategy_results in group_by(results, "strategy").items():
+        correct_hits = [row for row in strategy_results if row.get("cache") == "hit" and row.get("correct")]
+        avoided_seconds = sum(
+            baseline_by_dataset.get(row.get("dataset", ""), global_baseline)
+            for row in correct_hits
+        )
+        rows.append(
+            {
+                "strategy": strategy,
+                "requests": len(strategy_results),
+                "correct_cache_hits": len(correct_hits),
+                "avoided_inference_seconds": avoided_seconds,
+                "estimated_savings_usd": avoided_seconds / 3600.0 * pod_hour_usd,
+                "estimated_savings_per_1000_requests_usd": (
+                    avoided_seconds / max(len(strategy_results), 1) * 1000.0 / 3600.0 * pod_hour_usd
+                ),
+            }
+        )
+    return sorted(rows, key=lambda row: row["strategy"])
+
+
+def threshold_sweep_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [
+        row for row in results
+        if row.get("text_similarity") is not None or row.get("similarity") is not None
+    ]
+    rows = []
+    for metric in ("text_similarity", "similarity"):
+        values_with_labels = [
+            (float(row[metric]), bool(row.get("expected_reuse_allowed")))
+            for row in candidates
+            if row.get(metric) is not None
+        ]
+        for threshold in [round(value / 100.0, 2) for value in range(70, 101, 2)]:
+            accepted = [(score, allowed) for score, allowed in values_with_labels if score >= threshold]
+            false_accepts = sum(1 for _, allowed in accepted if not allowed)
+            true_accepts = sum(1 for _, allowed in accepted if allowed)
+            rows.append(
+                {
+                    "metric": metric,
+                    "threshold": threshold,
+                    "accepted": len(accepted),
+                    "true_accepts": true_accepts,
+                    "false_accepts": false_accepts,
+                    "precision": ratio(true_accepts, true_accepts + false_accepts),
+                }
+            )
+    return rows
+
+
+def group_by(results: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        groups.setdefault(str(result.get(key) or "unknown"), []).append(result)
+    return groups
+
+
+def wer(pairs: list[tuple[str, str]]) -> float:
+    if not pairs:
+        return 0.0
+    try:
+        from jiwer import wer as jiwer_wer
+        return float(jiwer_wer([reference for reference, _ in pairs], [hypothesis for _, hypothesis in pairs]))
+    except ImportError:
+        total_words = sum(len(reference.split()) for reference, _ in pairs)
+        errors = sum(simple_edit_distance(reference.split(), hypothesis.split()) for reference, hypothesis in pairs)
+        return ratio(errors, total_words)
+
+
+def bleu(pairs: list[tuple[str, str]]) -> float:
+    if not pairs:
+        return 0.0
+    try:
+        import sacrebleu
+        return float(sacrebleu.corpus_bleu([hypothesis for _, hypothesis in pairs], [[reference for reference, _ in pairs]]).score)
+    except ImportError:
+        return 0.0
+
+
+def chrf(pairs: list[tuple[str, str]]) -> float:
+    if not pairs:
+        return 0.0
+    try:
+        import sacrebleu
+        return float(sacrebleu.corpus_chrf([hypothesis for _, hypothesis in pairs], [[reference for reference, _ in pairs]]).score)
+    except ImportError:
+        return 0.0
+
+
+def simple_edit_distance(left: list[str], right: list[str]) -> int:
+    previous = list(range(len(right) + 1))
+    for i, left_token in enumerate(left, start=1):
+        current = [i]
+        for j, right_token in enumerate(right, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (0 if left_token == right_token else 1),
+                )
+            )
+        previous = current
+    return previous[-1]
 
 
 def collect_db_stats(database_url: str | None) -> list[dict[str, Any]]:
@@ -402,6 +716,11 @@ def write_markdown_report(path: Path, config: BenchmarkConfig, results: list[dic
     summary = summarize(results)
     layers = group_summaries(results, "cache_layer")
     workloads = group_summaries(results, "workload")
+    strategies = group_summaries(results, "strategy")
+    datasets = group_summaries(results, "dataset")
+    confusion = confusion_matrix_rows(results)
+    quality = quality_metrics_rows(results)
+    cost = cost_model_rows(results, config.pod_hour_usd)
     lines = [
         "# Semantic Memory Evaluation Report",
         "",
@@ -416,11 +735,39 @@ def write_markdown_report(path: Path, config: BenchmarkConfig, results: list[dic
         f"- Average inference time: `{summary['avg_inference_time']:.4f}s`",
         f"- DB stats: `{'enabled' if config.database_url else 'not configured'}`",
         "",
+        "## Strategy Summary",
+        "",
+        "| Strategy | Requests | Hit rate | Incorrect | Safe reuse | p95 latency |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in strategies:
+        lines.append(
+            f"| {row['group']} | {row['requests']} | {row['hit_rate']:.2%} | "
+            f"{row['incorrect_cases']} | {row['safe_reuse_rate']:.2%} | {row['p95_client_total_time']:.4f}s |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Dataset Summary",
+            "",
+            "| Dataset | Requests | Hit rate | Incorrect | p95 latency |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for row in datasets:
+        lines.append(
+            f"| {row['group']} | {row['requests']} | {row['hit_rate']:.2%} | "
+            f"{row['incorrect_cases']} | {row['p95_client_total_time']:.4f}s |"
+        )
+    lines.extend(
+        [
+            "",
         "## Cache Layers",
         "",
         "| Layer | Requests | Hit rate | p95 latency | Avg inference |",
         "|---|---:|---:|---:|---:|",
-    ]
+        ]
+    )
     for row in layers:
         lines.append(
             f"| {row['group']} | {row['requests']} | {row['hit_rate']:.2%} | "
@@ -435,12 +782,57 @@ def write_markdown_report(path: Path, config: BenchmarkConfig, results: list[dic
     lines.extend(
         [
             "",
+            "## Cache Safety",
+            "",
+            "| Strategy | TP | FP | FN | TN | Precision | Recall |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in confusion:
+        lines.append(
+            f"| {row['strategy']} | {row['true_positive']} | {row['false_positive']} | "
+            f"{row['false_negative']} | {row['true_negative']} | {row['precision']:.2%} | {row['recall']:.2%} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Quality Metrics",
+            "",
+            "| Group type | Group | Source WER | BLEU | chrF | Source pairs | Translation pairs |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in quality:
+        lines.append(
+            f"| {row['group_type']} | {row['group']} | {row['source_wer']:.4f} | "
+            f"{row['translation_bleu']:.2f} | {row['translation_chrf']:.2f} | "
+            f"{row['source_pairs']} | {row['translation_pairs']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Cost Model",
+            "",
+            "| Strategy | Correct hits | Avoided inference seconds | Savings / 1k requests |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for row in cost:
+        lines.append(
+            f"| {row['strategy']} | {row['correct_cache_hits']} | "
+            f"{row['avoided_inference_seconds']:.4f} | "
+            f"${row['estimated_savings_per_1000_requests_usd']:.4f} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Interpretation Notes",
             "",
             "- `audio_exact` demonstrates repeat-audio reuse.",
             "- `text_exact` demonstrates naturally repeated speech when transcripts normalize identically.",
             "- `text_vector` should be treated conservatively and manually checked for false reuse.",
             "- `audio_vector` is an acoustic-fingerprint baseline, not a learned semantic speech embedding.",
+            "- Translation BLEU/chrF require a text hypothesis header or external ASR over translated audio; otherwise the suite records zero translation pairs instead of fabricating quality numbers.",
             "",
         ]
     )
@@ -466,6 +858,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--database-url", default=os.getenv("POLYGLOT_DATABASE_URL"))
     parser.add_argument("--api-key", default=os.getenv("POLYGLOT_API_TOKEN"))
+    parser.add_argument("--pod-hour-usd", type=float, default=0.0)
     return parser
 
 
@@ -490,6 +883,7 @@ def config_from_args(args: argparse.Namespace) -> BenchmarkConfig:
         timeout_seconds=args.timeout_seconds,
         database_url=args.database_url,
         api_key=args.api_key,
+        pod_hour_usd=args.pod_hour_usd,
     )
 
 

@@ -30,8 +30,25 @@ stop_services() {
 trap stop_services EXIT
 trap 'exit 143' TERM INT
 
-mkdir -p "$(dirname "${PGDATA}")"
-chown -R postgres:postgres "$(dirname "${PGDATA}")"
+mkdir -p "${PGDATA}"
+if ! chown -R postgres:postgres "${PGDATA}"; then
+    echo "Warning: could not chown ${PGDATA}; falling back to ephemeral Postgres storage"
+    export PGDATA="/tmp/polyglot-postgres"
+    mkdir -p "${PGDATA}"
+    chown -R postgres:postgres "${PGDATA}"
+fi
+
+if command -v sshd >/dev/null 2>&1; then
+    mkdir -p /run/sshd
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    if [[ -n "${RUNPOD_SSH_PUBLIC_KEY:-}" ]]; then
+        printf '%s\n' "${RUNPOD_SSH_PUBLIC_KEY}" > /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+    fi
+    echo "Starting SSH daemon"
+    /usr/sbin/sshd
+fi
 
 if [[ ! -f "${PGDATA}/PG_VERSION" ]]; then
     echo "Initializing Postgres data directory at ${PGDATA}"
