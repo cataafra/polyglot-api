@@ -22,6 +22,7 @@ DEFAULT_TRANSLATION_MODEL = "facebook/seamless-m4t-v2-large"
 DEFAULT_MODEL_VERSION = "local-or-huggingface"
 DEFAULT_AUDIO_EMBEDDING_MODEL = "polyglot-audio-fingerprint"
 DEFAULT_AUDIO_EMBEDDING_VERSION = "v1"
+ALLOWED_PRIVACY_LEVELS = {"transient", "private", "internal", "public"}
 
 
 @dataclass
@@ -67,6 +68,13 @@ def anonymize_identifier(value: Optional[str]) -> Optional[str]:
     return hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
 
 
+def normalize_privacy_level(value: Optional[str]) -> str:
+    privacy_level = (value or "transient").strip().lower()
+    if privacy_level not in ALLOWED_PRIVACY_LEVELS:
+        return "transient"
+    return privacy_level
+
+
 def retention_expiry(privacy_level: str) -> datetime:
     retention_days = {
         "transient": int(os.getenv("POLYGLOT_RETENTION_TRANSIENT_DAYS", "1")),
@@ -74,7 +82,7 @@ def retention_expiry(privacy_level: str) -> datetime:
         "internal": int(os.getenv("POLYGLOT_RETENTION_INTERNAL_DAYS", "30")),
         "public": int(os.getenv("POLYGLOT_RETENTION_PUBLIC_DAYS", "365")),
     }
-    days = retention_days.get(privacy_level, retention_days["transient"])
+    days = retention_days[normalize_privacy_level(privacy_level)]
     return datetime.now(timezone.utc) + timedelta(days=days)
 
 
@@ -232,7 +240,7 @@ class PostgresSemanticMemory:
             }
         except Exception as exc:
             logger.warning("Semantic memory health check failed: %s", exc)
-            return {"enabled": True, "status": False, "error": str(exc)}
+            return {"enabled": True, "status": False, "error": "semantic memory health check failed"}
 
     def lookup(
         self,
@@ -672,6 +680,8 @@ class PostgresSemanticMemory:
         audio_embedding_uuid = uuid.uuid4()
         text_embedding_uuid = uuid.uuid4()
         translation_uuid = uuid.uuid4()
+        transcript_model_name = self.transcript_model_name if text_fingerprint else None
+        transcript_model_version = self.transcript_model_version if text_fingerprint else None
 
         try:
             with self._connect() as conn:
@@ -725,6 +735,8 @@ class PostgresSemanticMemory:
                             privacy_level
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
                         """,
                         (
                             audio_segment_uuid,
@@ -734,8 +746,8 @@ class PostgresSemanticMemory:
                             text_fingerprint.source_transcript if text_fingerprint else None,
                             text_fingerprint.normalized_text if text_fingerprint else None,
                             text_fingerprint.text_hash if text_fingerprint else None,
-                            self.transcript_model_name if text_fingerprint else None,
-                            self.transcript_model_version if text_fingerprint else None,
+                            transcript_model_name,
+                            transcript_model_version,
                             fingerprint.duration_seconds,
                             fingerprint.sample_rate,
                             fingerprint.channels,
@@ -744,6 +756,39 @@ class PostgresSemanticMemory:
                             metadata.privacy_level,
                         ),
                     )
+                    segment_row = cur.fetchone()
+                    if segment_row:
+                        audio_segment_uuid = segment_row["id"]
+                    else:
+                        cur.execute(
+                            """
+                            SELECT id
+                            FROM audio_segments
+                            WHERE session_id = %s
+                              AND source_language = %s
+                              AND source_audio_hash = %s
+                              AND speaker_id = %s
+                              AND domain = %s
+                              AND privacy_level = %s
+                              AND COALESCE(transcript_model_name, '') = COALESCE(%s, '')
+                              AND COALESCE(transcript_model_version, '') = COALESCE(%s, '')
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                            """,
+                            (
+                                session_uuid,
+                                metadata.source_language,
+                                fingerprint.audio_hash,
+                                metadata.speaker_id,
+                                metadata.domain,
+                                metadata.privacy_level,
+                                transcript_model_name,
+                                transcript_model_version,
+                            ),
+                        )
+                        segment_row = cur.fetchone()
+                        if segment_row:
+                            audio_segment_uuid = segment_row["id"]
                     cur.execute(
                         """
                         INSERT INTO audio_translations (
@@ -757,6 +802,17 @@ class PostgresSemanticMemory:
                             translation_model_version
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (
+                            audio_segment_id,
+                            target_language,
+                            speaker_id,
+                            translation_model_name,
+                            translation_model_version
+                        )
+                        DO UPDATE SET
+                            translated_audio = EXCLUDED.translated_audio,
+                            output_samplerate = EXCLUDED.output_samplerate
+                        RETURNING id
                         """,
                         (
                             translation_uuid,
@@ -769,6 +825,9 @@ class PostgresSemanticMemory:
                             self.translation_model_version,
                         ),
                     )
+                    translation_row = cur.fetchone()
+                    if translation_row:
+                        translation_uuid = translation_row["id"]
                     cur.execute(
                         """
                         INSERT INTO audio_embeddings (
@@ -780,6 +839,14 @@ class PostgresSemanticMemory:
                             embedding
                         )
                         VALUES (%s, %s, %s, %s, %s, %s::vector)
+                        ON CONFLICT (
+                            audio_segment_id,
+                            embedding_model_name,
+                            embedding_model_version
+                        )
+                        DO UPDATE SET
+                            source_audio_hash = EXCLUDED.source_audio_hash,
+                            embedding = EXCLUDED.embedding
                         """,
                         (
                             audio_embedding_uuid,
@@ -802,6 +869,14 @@ class PostgresSemanticMemory:
                                 embedding
                             )
                             VALUES (%s, %s, %s, %s, %s, %s::vector)
+                            ON CONFLICT (
+                                audio_segment_id,
+                                embedding_model_name,
+                                embedding_model_version
+                            )
+                            DO UPDATE SET
+                                source_text_hash = EXCLUDED.source_text_hash,
+                                embedding = EXCLUDED.embedding
                             """,
                             (
                                 text_embedding_uuid,

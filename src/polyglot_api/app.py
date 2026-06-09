@@ -4,7 +4,7 @@ from io import BytesIO
 from typing import Optional
 
 import colorlog
-from fastapi import Depends, FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.background import BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -123,7 +123,7 @@ def process(
         )
     except Exception as exc:
         logger.error("There was an error processing the file: ", exc_info=True)
-        return {"message": "There was an error processing the file: " + str(exc)}
+        raise _internal_server_error("There was an error processing the file") from exc
     finally:
         file.file.close()
 
@@ -156,13 +156,13 @@ def process_memory(
             use_transcript_memory=use_transcript_memory,
         )
         return StreamingResponse(
-            BytesIO(result.audio_bytes),
+            BytesIO(result.audio_bytes),ss
             media_type="audio/wav",
             headers=result.headers,
         )
     except Exception as exc:
         logger.error("There was an error processing the file: ", exc_info=True)
-        return {"message": "There was an error processing the file: " + str(exc)}
+        raise _internal_server_error("There was an error processing the file") from exc
     finally:
         file.file.close()
 
@@ -173,7 +173,14 @@ def expire_memory(_authorized: bool = Depends(require_api_token)):
         return {"deleted_sessions": semantic_memory.expire_old_records()}
     except Exception as exc:
         logger.error("There was an error expiring semantic memory: ", exc_info=True)
-        return {"message": "There was an error expiring semantic memory: " + str(exc)}
+        raise _internal_server_error("There was an error expiring semantic memory") from exc
+
+
+def _internal_server_error(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=message,
+    )
 
 
 def _process_upload(

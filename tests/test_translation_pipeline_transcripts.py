@@ -4,7 +4,12 @@ import time
 import numpy as np
 
 from polyglot_api.audio_fingerprint import build_audio_fingerprint
-from polyglot_api.semantic_memory import CacheLookupResult, PostgresSemanticMemory, SemanticMemoryMetadata
+from polyglot_api.semantic_memory import (
+    CacheLookupResult,
+    PostgresSemanticMemory,
+    SemanticMemoryMetadata,
+    normalize_privacy_level,
+)
 from polyglot_api.text_semantics import build_text_fingerprint
 from polyglot_api.translation_pipeline import TranslationPipeline, TranslationRequest
 
@@ -55,6 +60,7 @@ class RecordingMemory:
 class FakeCursor:
     def __init__(self):
         self.audit_details = []
+        self.fetchone_rows = []
 
     def __enter__(self):
         return self
@@ -63,8 +69,17 @@ class FakeCursor:
         return False
 
     def execute(self, query, params=None):
+        if "INSERT INTO audio_segments" in query:
+            self.fetchone_rows.append({"id": params[0]})
+        if "INSERT INTO audio_translations" in query:
+            self.fetchone_rows.append({"id": params[0]})
         if "INSERT INTO audit_events" in query:
             self.audit_details.append(json.loads(params[2]))
+
+    def fetchone(self):
+        if not self.fetchone_rows:
+            return None
+        return self.fetchone_rows.pop(0)
 
 
 class FakeConnection:
@@ -295,6 +310,13 @@ def test_semantic_store_audit_omits_raw_and_normalized_transcript(monkeypatch):
     assert "normalized_source_text" not in audit_details
     assert "source_transcript" not in audit_details
     assert "caine" not in json.dumps(audit_details)
+
+
+def test_privacy_level_normalization_is_conservative():
+    assert normalize_privacy_level("private") == "private"
+    assert normalize_privacy_level("PUBLIC") == "public"
+    assert normalize_privacy_level("unexpected") == "transient"
+    assert normalize_privacy_level(None) == "transient"
 
 
 def test_lookup_order_prefers_audio_exact_before_text_exact():

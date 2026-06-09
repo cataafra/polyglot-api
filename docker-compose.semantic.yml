@@ -17,6 +17,7 @@ services:
 
   api:
     build: .
+    gpus: all
     environment:
       POLYGLOT_DATABASE_URL: postgresql://polyglot:polyglot@db:5432/polyglot
       POLYGLOT_AUTO_INIT_DB: "true"

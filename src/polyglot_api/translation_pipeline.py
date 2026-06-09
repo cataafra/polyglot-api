@@ -12,6 +12,7 @@ from .audio_fingerprint import build_audio_fingerprint
 from .semantic_memory import (
     CacheLookupResult,
     SemanticMemoryMetadata,
+    normalize_privacy_level,
     parse_bool,
 )
 from .text_semantics import TextFingerprint, build_text_fingerprint
@@ -140,7 +141,7 @@ class TranslationPipeline:
             target_language=request.target_language,
             speaker_id=str(request.speaker_id),
             domain=request.domain or "general",
-            privacy_level=request.privacy_level or "transient",
+            privacy_level=normalize_privacy_level(request.privacy_level),
             cache_strategy=request.cache_strategy or os.getenv("POLYGLOT_CACHE_STRATEGY", "context"),
             use_semantic_cache=parse_bool(
                 request.use_semantic_cache,

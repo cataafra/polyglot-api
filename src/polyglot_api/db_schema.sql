@@ -5,7 +5,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     external_session_id TEXT UNIQUE NOT NULL,
     anonymized_user_id TEXT,
     domain TEXT NOT NULL DEFAULT 'general',
-    privacy_level TEXT NOT NULL DEFAULT 'transient',
+    privacy_level TEXT NOT NULL DEFAULT 'transient'
+        CHECK (privacy_level IN ('transient', 'private', 'internal', 'public')),
     retention_expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -35,8 +36,12 @@ CREATE TABLE IF NOT EXISTS audio_segments (
     channels INTEGER NOT NULL,
     speaker_id TEXT NOT NULL,
     domain TEXT NOT NULL DEFAULT 'general',
-    privacy_level TEXT NOT NULL DEFAULT 'transient',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    privacy_level TEXT NOT NULL DEFAULT 'transient'
+        CHECK (privacy_level IN ('transient', 'private', 'internal', 'public')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (duration_seconds > 0),
+    CHECK (input_samplerate > 0),
+    CHECK (channels > 0)
 );
 
 ALTER TABLE audio_segments
@@ -55,6 +60,18 @@ CREATE INDEX IF NOT EXISTS idx_audio_segments_context
 CREATE INDEX IF NOT EXISTS idx_audio_segments_text_hash
     ON audio_segments (source_text_hash);
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_audio_segments_exact_context
+    ON audio_segments (
+        session_id,
+        source_language,
+        source_audio_hash,
+        speaker_id,
+        domain,
+        privacy_level,
+        COALESCE(transcript_model_name, ''),
+        COALESCE(transcript_model_version, '')
+    );
+
 CREATE TABLE IF NOT EXISTS audio_translations (
     id UUID PRIMARY KEY,
     audio_segment_id UUID NOT NULL REFERENCES audio_segments(id) ON DELETE CASCADE,
@@ -66,7 +83,8 @@ CREATE TABLE IF NOT EXISTS audio_translations (
     speaker_id TEXT NOT NULL,
     translation_model_name TEXT NOT NULL,
     translation_model_version TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (output_samplerate > 0)
 );
 
 ALTER TABLE audio_translations
@@ -74,6 +92,15 @@ ALTER TABLE audio_translations
 
 CREATE INDEX IF NOT EXISTS idx_audio_translations_lookup
     ON audio_translations (
+        target_language,
+        speaker_id,
+        translation_model_name,
+        translation_model_version
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_audio_translations_segment_model
+    ON audio_translations (
+        audio_segment_id,
         target_language,
         speaker_id,
         translation_model_name,
@@ -97,6 +124,13 @@ CREATE INDEX IF NOT EXISTS idx_audio_embeddings_vector
     ON audio_embeddings USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_audio_embeddings_segment_model
+    ON audio_embeddings (
+        audio_segment_id,
+        embedding_model_name,
+        embedding_model_version
+    );
+
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id UUID PRIMARY KEY,
     audio_segment_id UUID NOT NULL REFERENCES audio_segments(id) ON DELETE CASCADE,
@@ -113,6 +147,13 @@ CREATE INDEX IF NOT EXISTS idx_text_embeddings_hash
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_vector
     ON text_embeddings USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_text_embeddings_segment_model
+    ON text_embeddings (
+        audio_segment_id,
+        embedding_model_name,
+        embedding_model_version
+    );
 
 CREATE TABLE IF NOT EXISTS terminology_memory (
     id UUID PRIMARY KEY,
